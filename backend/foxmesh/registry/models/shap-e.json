@@ -1,0 +1,21 @@
+{
+  "id": "shap-e",
+  "name": "Shap-E",
+  "version": "1.0",
+  "adapter": "http",
+  "description": "OpenAI Shap-E text/image-to-3D via a FoxMesh inference server. Fast, low detail.",
+  "tasks": ["generate_3d", "image_to_3d"],
+  "inputs": ["text", "image"],
+  "outputs": ["ply", "obj"],
+  "runtime": "local_gpu",
+  "vram_gb": 8,
+  "est_runtime_s": 20,
+  "quality": {"accuracy": 0.45, "mesh": 0.35, "texture": 0.2},
+  "topology": "dense",
+  "watertight": false,
+  "produces_textures": false,
+  "license": "MIT",
+  "commercial_use": true,
+  "enabled": false,
+  "config": {"endpoint": null, "model": "shap-e"}
+}

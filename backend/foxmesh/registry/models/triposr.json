@@ -1,0 +1,21 @@
+{
+  "id": "triposr",
+  "name": "TripoSR",
+  "version": "1.0",
+  "adapter": "http",
+  "description": "Stability AI / Tripo single-image reconstruction via a FoxMesh inference server. Very fast, vertex colours only.",
+  "tasks": ["image_to_3d"],
+  "inputs": ["image"],
+  "outputs": ["obj", "glb"],
+  "runtime": "local_gpu",
+  "vram_gb": 6,
+  "est_runtime_s": 5,
+  "quality": {"accuracy": 0.6, "mesh": 0.5, "texture": 0.3},
+  "topology": "dense",
+  "watertight": false,
+  "produces_textures": false,
+  "license": "MIT",
+  "commercial_use": true,
+  "enabled": false,
+  "config": {"endpoint": null, "model": "triposr", "mc_resolution": 256}
+}
