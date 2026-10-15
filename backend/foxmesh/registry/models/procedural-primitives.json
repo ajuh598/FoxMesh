@@ -1,0 +1,20 @@
+{
+  "id": "procedural-primitives",
+  "name": "Procedural Primitives",
+  "version": "1.0.0",
+  "adapter": "procedural",
+  "description": "Built-in CPU generator that assembles simple shapes from keywords. Always available; used for development, tests and as a last-resort fallback.",
+  "tasks": ["generate_3d"],
+  "inputs": ["text"],
+  "outputs": ["glb", "obj"],
+  "runtime": "cpu",
+  "vram_gb": 0,
+  "est_runtime_s": 0.5,
+  "quality": {"accuracy": 0.25, "mesh": 0.6, "texture": 0.0},
+  "topology": "clean",
+  "watertight": true,
+  "produces_textures": false,
+  "license": "Apache-2.0 (FoxMesh)",
+  "commercial_use": true,
+  "enabled": true
+}

@@ -1,0 +1,21 @@
+{
+  "id": "hunyuan3d-2",
+  "name": "Hunyuan3D 2.0",
+  "version": "2.0",
+  "adapter": "http",
+  "description": "Tencent Hunyuan3D 2.0 shape + texture generation via a FoxMesh inference server. Highest detail, heaviest.",
+  "tasks": ["image_to_3d", "generate_3d"],
+  "inputs": ["image", "text"],
+  "outputs": ["glb"],
+  "runtime": "local_gpu",
+  "vram_gb": 24,
+  "est_runtime_s": 120,
+  "quality": {"accuracy": 0.8, "mesh": 0.85, "texture": 0.8},
+  "topology": "dense",
+  "watertight": false,
+  "produces_textures": true,
+  "license": "Tencent Hunyuan Community License (territory and usage restrictions apply; review before use)",
+  "commercial_use": false,
+  "enabled": false,
+  "config": {"endpoint": null, "model": "hunyuan3d-2"}
+}
