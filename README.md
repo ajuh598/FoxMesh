@@ -1,2 +1,161 @@
 # FoxMesh
-FoxMesh
+
+Blender 기반 지능형 3D 생성 AI 플랫폼. 사용자의 요청을 분석해 등록된 AI 모델 중 가장 적합한 것을
+**규칙과 점수로** 자동 선택하고, 생성 → Blender 후처리 → 자동 검증까지 사람의 개입 없이 실행합니다.
+AI끼리 자연어로 대화하거나 토론하는 단계는 없습니다. 모든 단계는 구조화된 데이터(`TaskSpec`,
+`RoutingDecision`, Blender 리포트)로 연결됩니다.
+
+```
+사용자 요청 ─▶ 요청 분석(규칙) ─▶ 후보 필터링(필수 조건) ─▶ 점수 기반 선택 ─▶ AI 생성
+           ─▶ Blender 후처리(필요한 단계만) ─▶ 자동 검증 ─▶ 실패 시 제한된 재시도/대체 모델 ─▶ 결과
+```
+
+## 구성
+
+| 경로 | 역할 |
+| --- | --- |
+| `backend/foxmesh/classifier.py` | 규칙 기반 요청 분석. 한국어·영어 키워드와 정규식으로 작업 유형, 목적(프로필), 출력 형식, 폴리곤 예산, 크기를 추출. LLM 호출 없음, 결과 캐싱 |
+| `backend/foxmesh/registry/` | AI 모델 레지스트리. 모델 하나 = JSON 파일 하나(`registry/models/*.json`). 실행 통계(실행 수, 실패율, 평균 시간, 검증 점수)를 실제 로그로 누적 |
+| `backend/foxmesh/router.py` | 작업 라우팅 엔진. 필수 조건 필터 후 가중 점수로 선택 |
+| `backend/foxmesh/gpu.py` | `nvidia-smi` 기반 VRAM 모니터링과 작업별 VRAM 예약 |
+| `backend/foxmesh/adapters/` | 모델 실행 어댑터: 내장 절차적 생성기(CPU), GPU 추론 서버용 HTTP 어댑터, entry point 플러그인 |
+| `backend/foxmesh/blender/` | Blender 자동화: 작업별 단계 선택(`planner.py`), Blender 내부 스크립트(`bpy_pipeline.py`), 별도 프로세스 실행(`worker.py`) |
+| `backend/foxmesh/validation.py` | 결과 검증: 파일 형식(내용 기반), 메시, 폴리곤 예산, 폐쇄성, 재질, UV, 크기 |
+| `backend/foxmesh/pipeline.py` | 실행 엔진: 생성 → 후처리 → 검증, 재시도와 대체 모델 |
+| `backend/foxmesh/jobs.py` | 비동기 작업 큐: 중복 요청 방지, 취소 |
+| `backend/foxmesh/api/` | FastAPI HTTP API |
+| `backend/foxmesh/inference/` | GPU 추론 서버: 모델을 메모리에 유지(프로세스 재사용), VRAM 예산 내 LRU 언로드 |
+| `frontend/` | Next.js 웹: 대시보드, 생성 페이지, 작업 상세(3D 미리보기), 실행 엔진 관리 |
+
+## 모델 자동 선택
+
+### 1) 필수 조건 (하나라도 어기면 점수와 무관하게 제외)
+
+- 활성화 여부, 어댑터 설치 여부, 추론 서버 주소 설정 여부
+- 작업 유형 지원 (텍스트→3D, 이미지→3D 등)
+- 입력 지원 (이미지 작업은 이미지 입력 필수, 텍스트는 보조 정보)
+- 출력 형식: 직접 출력하거나, Blender로 변환 가능한 형식일 것
+- VRAM: 로컬 GPU 모델은 현재 사용 가능한 VRAM 이하일 것 (원격/CPU 모델은 제외)
+- 라이선스: 상업적 사용이 필요하면(`FOXMESH_COMMERCIAL_USE`, 기본 true) 비상업 라이선스 제외
+- 안정성: 최근 20회 중 5회 이상 실행했고 실패율이 50%를 넘으면 제외
+- 마감 시간: 예상 실행 시간이 요청한 시간을 넘으면 제외
+
+제외된 모델과 이유는 모두 `RoutingDecision.rejected`에 남고 웹에 표시됩니다.
+
+### 2) 점수 (모든 항목 0~1로 정규화)
+
+```
+선택 점수 = w정확도·정확도 + w속도·속도 + w품질·품질 + w안정성·안정성 + w자원·자원효율
+```
+
+- **정확도**: 사전 추정치와 실제 검증 점수 평균을 표본 수에 따라 섞은 값(실행이 쌓일수록 실측 위주)
+- **속도**: 실측 평균 시간(없으면 추정치)을 프로필 기준 시간 대비 로그 스케일로 환산. 기준 시간이면 0.5
+- **품질**: 프로필마다 의미가 다름. 게임용은 토폴로지(폴리곤 효율), 3D 프린팅은 폐쇄성(watertight)과 형상 위주
+- **안정성**: 최근 실패율에 베이지안 사전값을 둔 값
+- **자원 효율**: 현재 남은 VRAM 대비 요구량
+
+| 프로필 | 우선순위 | 최소 품질 |
+| --- | --- | --- |
+| 빠른 시제품 `prototype` | 속도 35%, 자원 25% | 0 |
+| 균형 `balanced` | 정확도·품질 25%씩 | 0.3 |
+| 고품질 `high_quality` | 품질 37%, 정확도 30% | 0.6 |
+| 게임용 에셋 `game_asset` | 품질(토폴로지) 35% | 0.4 |
+| 3D 프린팅 `print_3d` | 품질(폐쇄성) 35%, 안정성 30% | 0.4 |
+
+최소 품질을 넘는 후보 중에서만 고르며, 점수 차가 0.02 이내면 더 빠르고 VRAM을 덜 쓰는 모델을 우선합니다.
+가중치는 웹의 **실행 엔진 관리** 페이지나 `PUT /api/policies/{profile}`로 바꿀 수 있습니다.
+
+## Blender 후처리 (필요한 단계만 실행)
+
+| 작업 | 실행 단계 |
+| --- | --- |
+| 공통 | 불러오기, 검사, 내보내기, 썸네일 |
+| 빠른 시제품 | + 크기·원점 정규화 |
+| 게임용 에셋 | + 정규화, 법선 정리, UV 검사(없으면 자동 펼침), 재질 연결, 폴리곤 예산 초과 시 데시메이트 |
+| 3D 프린팅 | + 정규화(요청 크기로 스케일), 법선 정리·정점 병합, 폐쇄성 검사와 구멍 메우기, STL은 mm 단위 |
+| 고품질 | + 정규화, 법선, UV, 재질, BLEND 프로젝트 저장 |
+| 미리보기 / 변환 | 썸네일만 / 형식 변환만 |
+
+Blender는 항상 별도 프로세스(`blender --background`)로 실행되어 충돌·멈춤이 API 서버에 영향을 주지 않고,
+작업 취소 시 프로세스를 종료합니다. Blender가 없으면 형식이 같은 파일만 복사하는 기본 처리로 동작합니다.
+
+## 실행
+
+### 백엔드
+
+```bash
+cd backend
+pip install -e ".[dev]"
+
+# Blender 경로 (없으면 PATH의 blender 사용, 그것도 없으면 기본 처리만)
+export FOXMESH_BLENDER=/opt/blender/blender
+# GPU를 감지하지 못하는 환경에서 VRAM 크기를 직접 지정 (GB)
+export FOXMESH_VRAM_GB=24
+
+foxmesh serve --port 8000                       # API 서버
+foxmesh analyze "게임에 사용할 중세풍 검을 만들어 줘"   # 선택 과정만 확인 (실행 안 함)
+foxmesh run "3D 프린팅용 10cm 컵"                 # 한 번 실행
+foxmesh models                                  # 등록 모델과 실행 가능 여부
+```
+
+pip의 `bpy` 모듈(Blender 4.2는 Python 3.11 필요)을 쓸 경우:
+`FOXMESH_BLENDER=/path/to/python3.11 FOXMESH_BLENDER_MODE=bpy`.
+
+### 프론트엔드
+
+```bash
+cd frontend
+npm install
+FOXMESH_API_URL=http://127.0.0.1:8000 npm run dev   # http://localhost:3000
+```
+
+`/api/*` 요청은 Next.js가 백엔드로 프록시합니다.
+
+### 테스트
+
+```bash
+cd backend
+pytest                                            # Blender 없이 전체 테스트
+FOXMESH_TEST_BLENDER=/opt/blender/blender FOXMESH_TEST_BLENDER_MODE=blender pytest tests/test_blender.py
+```
+
+## 실제 AI 모델 연결
+
+기본 상태에서는 내장 **절차적 생성기**(키워드로 검·테이블·의자·나무·집 등 기본 형상 조립)만 활성화되어 있어
+GPU 없이 전체 흐름을 확인할 수 있습니다. Shap-E, TripoSR, TRELLIS, Hunyuan3D 2.0 설명 파일이 함께 등록되어
+있지만 비활성 상태입니다. 이 파일들의 실행 시간·VRAM·품질 값은 **초기 추정치**이며, 실제 실행 로그가 쌓이면
+라우터는 실측값을 사용합니다. 라이선스는 사용 전에 반드시 직접 확인하세요.
+
+1. GPU 머신에서 추론 서버를 실행합니다. 모델별로 `ModelRunner`를 구현해 등록합니다
+   (`backend/foxmesh/inference/server.py` 문서 참고).
+   ```bash
+   FOXMESH_INFERENCE_RUNNERS=mypkg.runners:TripoSRRunner FOXMESH_INFERENCE_VRAM_GB=24 \
+     uvicorn foxmesh.inference.server:app --host 0.0.0.0 --port 9000
+   ```
+2. 실행 엔진 관리 페이지에서 해당 모델을 활성화하고 추론 서버 주소를 입력합니다
+   (또는 `PATCH /api/models/triposr {"enabled": true, "config": {"endpoint": "http://gpu:9000"}}`).
+3. 새 모델은 JSON 설명 파일을 `FOXMESH_MODELS_DIR` 디렉터리에 두거나 `POST /api/models`로 등록합니다.
+   새로운 실행 방식은 `GenerationAdapter`를 구현해 `foxmesh.adapters` entry point로 배포하면 됩니다.
+
+## API 요약
+
+| 메서드 | 경로 | 설명 |
+| --- | --- | --- |
+| `POST` | `/api/analyze` | 요청 분석과 모델 선택 결과만 반환 (실행 안 함) |
+| `POST` | `/api/jobs` | 작업 등록. 같은 요청이 진행 중이거나 최근 성공했으면 기존 작업 반환 |
+| `GET` | `/api/jobs`, `/api/jobs/{id}` | 작업 목록 / 상세(진행 단계, 선택 근거, 시도 기록, 검증 결과) |
+| `POST` | `/api/jobs/{id}/cancel` | 작업 취소 |
+| `GET` | `/api/jobs/{id}/files/{name}` | 결과 파일 다운로드 |
+| `PUT` | `/api/uploads?filename=` | 이미지·3D 파일 업로드 (본문에 파일 바이트) |
+| `GET/POST/PATCH` | `/api/models[/{id}]` | 모델 목록·등록·활성화·버전·설정 변경 |
+| `GET/PUT/DELETE` | `/api/policies[/{profile}]` | 자동 선택 가중치 조회·변경·초기화 |
+| `GET` | `/api/system`, `/api/dashboard` | GPU·Blender·대기열 상태, 대시보드 요약 |
+
+## 개발 단계 진행 현황
+
+- [x] 1단계 자동 선택 엔진: 작업 분류, 모델 레지스트리, 후보 필터링, 점수 기반 선택, 실행 로그(`var/runs.jsonl`)
+- [x] 2단계 Blender 연동: 백그라운드 실행, 자동 불러오기, 메시·재질 검사, BLEND/GLB 출력, 썸네일 렌더링
+- [x] 3단계 웹 통합: 생성 페이지, 작업 대기열, 진행 상태, 결과 미리보기, 실행 엔진 관리
+- [~] 4단계 성능 최적화: VRAM 기반 실행 제한, 추론 서버 모델 재사용, 중복 작업 방지, 실측 성능 반영, 대체 실행 완료.
+  남은 일: 작업 상태를 Redis/PostgreSQL에 저장(현재는 메모리 + `var/` 파일), 결과 캐시 만료 정책
+- [ ] 5단계 자체 AI 개발: 자체 모델은 `ModelRunner` + JSON 설명 파일로 등록하면 자동 선택 대상에 포함됨
