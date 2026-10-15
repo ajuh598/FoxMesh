@@ -17,3 +17,5 @@ ai/runs/
 ai/models/
 ai/data/
 *.pt
+build/
+dist/
