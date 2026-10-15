@@ -99,3 +99,15 @@ def test_chamfer():
     assert chamfer_and_fscore(a, a) == (0.0, 1.0)
     c, f = chamfer_and_fscore(a, a + 5.0)
     assert c > 4 and f == 0.0
+
+
+def test_connected_components_and_fragment_removal():
+    from foxmesh_ai.geometry import connected_components, remove_small_components
+
+    big = sphere_field(32, r=0.5, center=(-0.3, 0, 0))
+    small = sphere_field(32, r=0.12, center=(0.65, 0, 0))
+    m = surface_nets(np.maximum(big, small))
+    assert connected_components(m).max() + 1 == 2
+    cleaned = remove_small_components(m, 0.1)
+    assert connected_components(cleaned).max() + 1 == 1 and cleaned.watertight
+    assert remove_small_components(m, 0.01).faces.shape == m.faces.shape

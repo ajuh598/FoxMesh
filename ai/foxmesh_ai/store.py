@@ -50,13 +50,22 @@ class ModelStore:
         vdir = self.root / version
         vdir.mkdir(parents=True)
         params = sum(t.numel() for t in (ckpt.get("ema") or ckpt["model"]).values())
+        dataset = dict(ckpt.get("dataset") or {})
+        if dataset.get("root") and "sources" not in dataset:
+            try:
+                from .data.dataset import Dataset
+
+                stats = Dataset(dataset["root"]).stats()
+                dataset.update(sources=stats["sources"], items=stats["items"])
+            except (OSError, ValueError, KeyError):
+                pass
         torch.save({"ema": ckpt.get("ema") or ckpt["model"], "model_config": ckpt["model_config"],
-                    "train_config": ckpt.get("train_config"), "dataset": ckpt.get("dataset"),
+                    "train_config": ckpt.get("train_config"), "dataset": dataset,
                     "step": ckpt.get("step"), "epoch": ckpt.get("epoch"), "version": version},
                    vdir / "model.pt")
         summary = {
             "created": time.time(), "parameters": int(params), "parent": parent, "notes": notes,
-            "dataset": ckpt.get("dataset"), "steps": ckpt.get("step"),
+            "dataset": dataset, "steps": ckpt.get("step"),
             "best_val_iou": ckpt.get("best_iou"), "library_version": __version__,
             "metrics": metrics or {},
         }
@@ -159,15 +168,20 @@ class ModelStore:
     def platform_spec(self, version: str = "production", device: str = "auto", resolution: int = 64) -> dict:
         """A FoxMesh platform model descriptor (``ModelSpec`` JSON) for this version.
 
-        Quality priors come from the evaluation report; the platform replaces them with
-        measured values as it runs the model.
+        Quality priors come from the evaluation report (accuracy: occupancy IoU, discounted
+        for models trained only on procedural data; mesh: watertight rate and Chamfer
+        distance); the platform replaces them with measured values as it runs the model.
         """
         version = self.resolve(version)
         info = self.index["versions"][version]
         metrics = info.get("metrics") or {}
         text = metrics.get("val_text") or next((r for r in metrics.values() if isinstance(r, dict)), {})
-        fscore = float(text.get("fscore", 0.3))
         iou = float(text.get("iou", 0.3))
+        chamfer = float(text.get("chamfer", 0.1))
+        sources = set(((info.get("dataset") or {}).get("sources") or {}).keys())
+        # Scores measured on the training distribution overstate quality on real requests;
+        # a model trained only on procedural data is trusted less.
+        coverage = 0.7 if sources == {"synthetic"} else 1.0
         gpu = device == "cuda" or (device == "auto" and torch.cuda.is_available())
         seconds = float(text.get("mean_generation_s", 5.0)) or 5.0
         return {
@@ -184,9 +198,12 @@ class ModelStore:
             "runtime": "local_gpu" if gpu else "cpu",
             "vram_gb": 2 if gpu else 0,
             "est_runtime_s": round(max(seconds * 1.5, 0.5), 2),
-            "quality": {"accuracy": round(min(max(fscore, 0.05), 0.95), 3),
-                        "mesh": round(min(max(0.5 * iou + 0.5 * float(text.get("watertight_rate", 1.0)), 0.05), 0.95), 3),
-                        "texture": 0.3},
+            "quality": {
+                "accuracy": round(min(max(iou * coverage, 0.05), 0.95), 3),
+                "mesh": round(min(max(0.5 * float(text.get("watertight_rate", 1.0))
+                                      + 0.5 * max(0.0, 1 - chamfer / 0.1), 0.05), 0.95), 3),
+                "texture": 0.3,
+            },
             "topology": "dense",
             "watertight": True,
             "produces_textures": False,

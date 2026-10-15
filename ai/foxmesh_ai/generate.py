@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from .geometry import TriMesh, surface_nets, taubin_smooth
+from .geometry import TriMesh, remove_small_components, surface_nets, taubin_smooth
 from .model import build_model
 from .text import PAD_ID, tokenize
 from .train import image_tensor, pick_device
@@ -81,17 +81,25 @@ class Generator:
         out = [self.model.decode(pts[:, i:i + chunk], cond)[1] for i in range(0, pts.shape[1], chunk)]
         return torch.cat(out, 1)[0].float().cpu().numpy()
 
-    def generate(self, prompt: str | None = None, image=None, resolution: int = 64, smooth: int = 3,
-                 size_m: float | None = 1.0) -> TriMesh:
-        """Return a closed, coloured mesh. ``size_m`` scales the largest side (None keeps model space)."""
-        started = time.perf_counter()
-        cond = self.condition(prompt, image)
-        logits = self.field(cond, resolution)
+    @staticmethod
+    def mesh_from_field(logits: np.ndarray, smooth: int = 3, min_component: float = 0.02) -> TriMesh:
+        """Closed mesh from occupancy logits; drops floating fragments smaller than
+        ``min_component`` of the surface area, then smooths."""
         if (logits > 0).sum() == 0:
             raise RuntimeError("the model predicted an empty shape for this input")
         mesh = surface_nets(logits)
+        if min_component:
+            mesh = remove_small_components(mesh, min_component)
         if smooth:
             mesh = taubin_smooth(mesh, smooth)
+        return mesh
+
+    def generate(self, prompt: str | None = None, image=None, resolution: int = 64, smooth: int = 3,
+                 size_m: float | None = 1.0, min_component: float = 0.02) -> TriMesh:
+        """Return a closed, coloured mesh. ``size_m`` scales the largest side (None keeps model space)."""
+        started = time.perf_counter()
+        cond = self.condition(prompt, image)
+        mesh = self.mesh_from_field(self.field(cond, resolution), smooth, min_component)
         mesh.colors = self.colors(cond, mesh.vertices)
         if size_m:
             lo, hi = mesh.bounds

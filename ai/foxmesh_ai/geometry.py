@@ -291,6 +291,47 @@ def surface_nets(field: np.ndarray, level: float = 0.0, bounds: float = 1.0) -> 
     return TriMesh(vertices, tris)
 
 
+def connected_components(mesh: TriMesh) -> np.ndarray:
+    """Component label per face (faces sharing a vertex are connected)."""
+    parent = np.arange(len(mesh.vertices))
+
+    def find(x: np.ndarray) -> np.ndarray:
+        while True:
+            p = parent[x]
+            if np.array_equal(p, x):
+                return x
+            parent[x] = parent[p]
+            x = parent[x]
+
+    for a, b in ((0, 1), (1, 2)):
+        u, v = mesh.faces[:, a], mesh.faces[:, b]
+        while True:  # vectorised union: hook roots together until every edge agrees
+            ru, rv = find(u.copy()), find(v.copy())
+            diff = ru != rv
+            if not diff.any():
+                break
+            lo, hi = np.minimum(ru[diff], rv[diff]), np.maximum(ru[diff], rv[diff])
+            parent[hi] = lo
+    roots = find(np.arange(len(mesh.vertices)))
+    return np.unique(roots[mesh.faces[:, 0]], return_inverse=True)[1]
+
+
+def remove_small_components(mesh: TriMesh, min_fraction: float = 0.02) -> TriMesh:
+    """Drop disconnected pieces whose surface area is below ``min_fraction`` of the total."""
+    labels = connected_components(mesh)
+    area = np.bincount(labels, weights=mesh.face_areas())
+    keep_label = area >= min_fraction * area.sum()
+    keep_faces = keep_label[labels]
+    if keep_faces.all():
+        return mesh
+    faces = mesh.faces[keep_faces]
+    used = np.unique(faces)
+    remap = -np.ones(len(mesh.vertices), np.int64)
+    remap[used] = np.arange(len(used))
+    return TriMesh(mesh.vertices[used], remap[faces],
+                   None if mesh.colors is None else mesh.colors[used], dict(mesh.meta))
+
+
 def taubin_smooth(mesh: TriMesh, iterations: int = 6, lam: float = 0.5, mu: float = -0.53) -> TriMesh:
     """Volume-preserving Laplacian smoothing (Taubin's lambda/mu)."""
     n = len(mesh.vertices)

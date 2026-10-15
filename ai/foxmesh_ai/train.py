@@ -252,7 +252,8 @@ class Trainer:
             "train_config": asdict(self.cfg), "epoch": epoch, "step": self.step,
             "history": self.history, "best_iou": self.best_iou,
             "dataset": {"name": self.dataset.meta["name"], "fingerprint": self.dataset.fingerprint(),
-                        "root": str(self.dataset.root)},
+                        "root": str(self.dataset.root), "items": len(self.dataset),
+                        "sources": self.dataset.stats()["sources"]},
         }, path)
         return path
 

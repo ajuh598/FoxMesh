@@ -29,6 +29,7 @@ function ModelRow({ view, onChange }: { view: ModelView; onChange: () => void })
       <div className="row">
         <strong>{spec.name}</strong>
         <span className="small muted mono">{spec.id} v{spec.version}</span>
+        {spec.adapter === "foxmesh_ai" && <span className="badge info">자체 모델</span>}
         {view.available ? <span className="badge ok">실행 가능</span> : <span className="badge muted">{reasonLabel(view.unavailable_reason)}</span>}
         <span className="spacer" />
         <label className="row small">

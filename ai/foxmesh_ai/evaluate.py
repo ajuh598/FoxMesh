@@ -20,7 +20,7 @@ import torch
 from .data.dataset import Dataset
 from .data.preprocess import load_sample
 from .generate import Generator
-from .geometry import chamfer_and_fscore, sample_surface, surface_nets
+from .geometry import chamfer_and_fscore, sample_surface
 
 
 @dataclass
@@ -38,6 +38,11 @@ class EvalReport:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def _group(item) -> str:
+    """Breakdown key: the synthetic family when known, else the first tag."""
+    return item.extra.get("family") or (item.tags[0] if item.tags else "untagged")
 
 
 def evaluate(generator: Generator, dataset: Dataset, split: str = "val", modality: str = "text",
@@ -65,20 +70,18 @@ def evaluate(generator: Generator, dataset: Dataset, split: str = "val", modalit
             pred, true = logits > 0, sample["uniform_occ"]
             union = (pred | true).sum()
             iou = 1.0 if union == 0 else float((pred & true).sum() / union)
-            field_ = generator.field(cond, resolution)
-            if (field_ > 0).sum() == 0:
-                raise RuntimeError("empty shape")
-            mesh = surface_nets(field_)
+            # Same post-processing as generation (fragment removal), without smoothing.
+            mesh = generator.mesh_from_field(generator.field(cond, resolution), smooth=0)
             elapsed = time.perf_counter() - started
             gen_pts, _, _ = sample_surface(mesh, surface_points, rng)
             gt = sample["surface_points"].astype(np.float32)
             gt = gt[rng.choice(len(gt), min(surface_points, len(gt)), replace=False)]
             chamfer, fscore = chamfer_and_fscore(gen_pts, gt)
-            rows.append({"tag": item.tags[0] if item.tags else "untagged", "iou": iou, "chamfer": chamfer,
+            rows.append({"tag": _group(item), "iou": iou, "chamfer": chamfer,
                          "fscore": fscore, "watertight": mesh.watertight, "seconds": elapsed})
         except Exception as exc:
             failures.append(f"{item.id}: {exc}")
-            rows.append({"tag": item.tags[0] if item.tags else "untagged", "iou": 0.0, "chamfer": 1.0,
+            rows.append({"tag": _group(item), "iou": 0.0, "chamfer": 1.0,
                          "fscore": 0.0, "watertight": False, "seconds": 0.0})
 
     def mean(key, subset=rows):
