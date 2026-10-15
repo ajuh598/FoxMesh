@@ -213,6 +213,31 @@ export interface RoutingPolicy {
   tie_margin: number;
 }
 
+export interface BenchmarkSummary {
+  model_id: string;
+  runs: number;
+  successes: number;
+  success_rate: number;
+  mean_generation_s: number | null;
+  p90_generation_s: number | null;
+  mean_validation_score: number | null;
+  skipped_cases: string[];
+}
+
+export interface BenchmarkRun {
+  id: string;
+  status: "running" | "done" | "failed";
+  started_at: number;
+  finished_at: number | null;
+  model_ids: string[];
+  case_ids: string[];
+  repeats: number;
+  progress: number;
+  total: number;
+  summary: BenchmarkSummary[];
+  error: string | null;
+}
+
 export interface SystemInfo {
   gpu: GpuSnapshot;
   blender: { available: boolean; executable: string | null; mode: string };
@@ -282,6 +307,9 @@ export const api = {
     }),
   resetPolicy: (profile: Profile) =>
     request<RoutingPolicy>(`/api/policies/${profile}`, { method: "DELETE" }),
+  benchmarks: () => request<BenchmarkRun[]>("/api/benchmarks?limit=5"),
+  startBenchmark: (body: { model_ids?: string[]; repeats?: number }) =>
+    request<BenchmarkRun>("/api/benchmarks", { method: "POST", body: JSON.stringify(body) }),
   async upload(file: File): Promise<{ id: string; filename: string; size: number }> {
     const res = await fetch(`/api/uploads?filename=${encodeURIComponent(file.name)}`, {
       method: "PUT",

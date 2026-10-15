@@ -47,6 +47,10 @@ class Settings:
     commercial_use: bool = field(default_factory=lambda: _env_bool("COMMERCIAL_USE", True))
     thumbnails: bool = field(default_factory=lambda: _env_bool("THUMBNAILS", True))
     dedup_ttl_s: float = field(default_factory=lambda: float(_env("DEDUP_TTL", "3600")))
+    # sqlite:///path, postgresql://..., or memory://; default is SQLite in the data dir.
+    database_url: str | None = field(default_factory=lambda: _env("DATABASE_URL"))
+    # Finished jobs, their files and unused uploads are deleted after this many days (0 = keep).
+    retention_days: float = field(default_factory=lambda: float(_env("RETENTION_DAYS", "30")))
 
     @property
     def jobs_dir(self) -> Path:

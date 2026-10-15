@@ -79,3 +79,13 @@ async def test_pool_keeps_models_loaded_and_evicts_lru():
     a.last_used, b.last_used = 2.0, 1.0
     await pool.acquire("c")
     assert not b.loaded and b.unloads == 1 and a.loaded and c.loaded
+
+
+async def test_pool_preload_and_idle_unload():
+    a, b = Dummy("a", 4), Dummy("b", 4)
+    pool = RunnerPool([a, b])
+    await pool.preload(["a", "b"])
+    assert a.loaded and b.loaded
+    a.last_used, b.last_used = 1000.0, 1900.0
+    assert await pool.unload_idle(600, now=2000.0) == ["a"]
+    assert not a.loaded and a.unloads == 1 and b.loaded

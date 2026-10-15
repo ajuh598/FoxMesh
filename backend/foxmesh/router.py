@@ -15,6 +15,7 @@ import logging
 import math
 import time
 from pathlib import Path
+from typing import Callable
 
 from .gpu import GpuMonitor
 from .registry import ModelRegistry, blend
@@ -22,6 +23,7 @@ from .schemas import (
     BLENDER_IMPORTABLE,
     GENERATIVE_TASKS,
     Candidate,
+    GpuSnapshot,
     ModelSpec,
     ModelStats,
     Modality,
@@ -72,9 +74,14 @@ QUALITY_MIX: dict[Profile, dict[str, float]] = {
 
 TOPOLOGY_SCORE = {Topology.CLEAN: 1.0, Topology.DENSE: 0.5, Topology.SOUP: 0.2}
 
-# A model is dropped once its recent failure rate exceeds this, given enough samples.
+# Circuit breaker: a model trips when its recent failure rate exceeds MAX_FAILURE_RATE
+# (given enough samples) or after CONSECUTIVE_FAILURES_TRIP failures in a row. A tripped
+# model is skipped for COOLDOWN_S, then gets one trial run ("half-open"); a success
+# closes the breaker again, a failure restarts the cooldown.
 MAX_FAILURE_RATE = 0.5
 MIN_SAMPLES_FOR_EXCLUSION = 5
+CONSECUTIVE_FAILURES_TRIP = 3
+COOLDOWN_S = 600.0
 # Measured runtimes count this much more than the prior when blending.
 RUNTIME_SAFETY = 1.2
 
@@ -122,6 +129,26 @@ class NoCandidateError(Exception):
         super().__init__(f"no model can run this task ({reasons or 'registry is empty'})")
 
 
+def breaker_state(stats: ModelStats, now: float) -> tuple[str, str | None]:
+    """Return ("closed" | "open" | "half_open", reason)."""
+    trailing = 0
+    for ok in reversed(stats.recent):
+        if ok:
+            break
+        trailing += 1
+    rate = stats.recent_failure_rate
+    if trailing >= CONSECUTIVE_FAILURES_TRIP:
+        reason = f"{trailing} failures in a row"
+    elif rate is not None and len(stats.recent) >= MIN_SAMPLES_FOR_EXCLUSION and rate > MAX_FAILURE_RATE:
+        reason = f"recent failure rate {rate:.0%}"
+    else:
+        return "closed", None
+    remaining = COOLDOWN_S - (now - (stats.last_run_at or 0.0))
+    if remaining > 0:
+        return "open", f"{reason}; cooling down for {remaining:.0f}s"
+    return "half_open", f"{reason}; trial run after cooldown"
+
+
 def effective_runtime(spec: ModelSpec, stats: ModelStats) -> float:
     successes = stats.runs - stats.failures
     measured = stats.mean_runtime_s * RUNTIME_SAFETY if stats.mean_runtime_s else None
@@ -163,19 +190,21 @@ class Router:
         policies: PolicyStore | None = None,
         blender_available: bool = False,
         max_fallbacks: int = 2,
+        clock: Callable[[], float] = time.time,
     ):
         self.registry = registry
         self.gpu = gpu
         self.policies = policies or PolicyStore()
         self.blender_available = blender_available
         self.max_fallbacks = max_fallbacks
+        self.clock = clock
 
     # -- filtering -----------------------------------------------------------
 
     def _hard_constraints(
-        self, spec: ModelSpec, task: TaskSpec, free_vram: float, total_vram: float
+        self, spec: ModelSpec, task: TaskSpec, gpu: GpuSnapshot, notes: list[str]
     ) -> tuple[list[str], bool]:
-        """Return (rejection reasons, needs_conversion)."""
+        """Return (rejection reasons, needs_conversion). Non-fatal remarks go to ``notes``."""
         reasons: list[str] = []
         if (why := self.registry.unavailable_reason(spec)) is not None:
             reasons.append(f"unavailable: {why}")
@@ -202,18 +231,26 @@ class Router:
                 reasons.append("output format cannot be imported into Blender")
 
         if spec.runtime is Runtime.LOCAL_GPU:
-            if spec.vram_gb > total_vram:
-                reasons.append(f"needs {spec.vram_gb:g} GB VRAM, GPU has {total_vram:g} GB")
-            elif spec.vram_gb > free_vram:
-                reasons.append(f"needs {spec.vram_gb:g} GB VRAM, {free_vram:g} GB free")
+            # VRAM held by FoxMesh's own running jobs comes back when they finish, so a
+            # model that fits then is kept and waits for its reservation instead of being
+            # dropped for a lighter one; memory used by other processes is not counted on.
+            obtainable = min(gpu.free_vram_gb + gpu.reserved_vram_gb, gpu.total_vram_gb)
+            if spec.vram_gb > gpu.total_vram_gb:
+                reasons.append(f"needs {spec.vram_gb:g} GB VRAM, GPU has {gpu.total_vram_gb:g} GB")
+            elif spec.vram_gb > obtainable:
+                reasons.append(f"needs {spec.vram_gb:g} GB VRAM, {obtainable:g} GB free")
+            elif spec.vram_gb > gpu.free_vram_gb:
+                notes.append(f"{spec.id} waits for {spec.vram_gb:g} GB VRAM held by running jobs")
 
         if task.commercial_use and not spec.commercial_use:
             reasons.append(f"license does not allow commercial use ({spec.license})")
 
         stats = self.registry.stats.get(spec.id)
-        rate = stats.recent_failure_rate
-        if rate is not None and len(stats.recent) >= MIN_SAMPLES_FOR_EXCLUSION and rate > MAX_FAILURE_RATE:
-            reasons.append(f"recent failure rate {rate:.0%}")
+        state, why = breaker_state(stats, self.clock())
+        if state == "open":
+            reasons.append(why)
+        elif state == "half_open":
+            notes.append(f"{spec.id}: {why}")
 
         if task.deadline_s is not None:
             runtime = effective_runtime(spec, stats)
@@ -269,14 +306,15 @@ class Router:
                 decision.rejected.append(Rejection(model_id=task.model_id, reasons=["unknown model"]))
 
         eligible: list[tuple[ModelSpec, bool]] = []
+        notes: dict[str, list[str]] = {}
         for spec in specs:
-            reasons, needs_conversion = self._hard_constraints(
-                spec, task, gpu.free_vram_gb, gpu.total_vram_gb
-            )
+            spec_notes: list[str] = []
+            reasons, needs_conversion = self._hard_constraints(spec, task, gpu, spec_notes)
             if reasons:
                 decision.rejected.append(Rejection(model_id=spec.id, reasons=reasons))
             else:
                 eligible.append((spec, needs_conversion))
+                notes[spec.id] = spec_notes
 
         candidates = []
         for spec, needs_conversion in eligible:
@@ -314,6 +352,8 @@ class Router:
             ranked = tied + [c for c in ranked if c not in tied]
             decision.selected = ranked[0].model_id
             decision.fallbacks = [c.model_id for c in ranked[1 : 1 + self.max_fallbacks]]
+            for model_id in [decision.selected, *decision.fallbacks]:
+                decision.warnings.extend(notes.get(model_id, []))
         decision.candidates = ranked
         decision.decided_in_ms = round((time.perf_counter() - started) * 1000, 3)
         if decision.selected is None:

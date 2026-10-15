@@ -89,6 +89,10 @@ class Job(BaseModel):
     created_at: float = Field(default_factory=time.time)
     started_at: float | None = None
     finished_at: float | None = None
+    # Times this job was re-queued after the process died while running it.
+    recoveries: int = 0
+    # Set by a user cancel; a cancellation without it is a shutdown, and the job is re-queued.
+    cancel_requested: bool = False
 
     def log(self, stage: Stage, message: str) -> None:
         self.stage = stage
@@ -122,11 +126,12 @@ class Pipeline:
         self.max_attempts = max_attempts
         self.transient_retries = transient_retries
         self.generation_timeout_s = generation_timeout_s
-        self._on_update = on_update or (lambda job: None)
+        # Called after every state change, e.g. to persist the job.
+        self.on_update: Callable[[Job], None] = on_update or (lambda job: None)
 
     def _update(self, job: Job, stage: Stage, message: str) -> None:
         job.log(stage, message)
-        self._on_update(job)
+        self.on_update(job)
 
     async def run(self, job: Job) -> Job:
         job.status = JobStatus.RUNNING
@@ -150,17 +155,26 @@ class Pipeline:
                 self._update(job, Stage.ROUTING, f"{job.spec.task_type.value}: Blender only")
                 await self._run_blender_only(job, job_dir)
         except asyncio.CancelledError:
-            job.status = JobStatus.CANCELLED
-            job.error = "cancelled"
-            self._update(job, job.stage, "cancelled")
+            if job.cancel_requested:
+                job.status = JobStatus.CANCELLED
+                job.error = "cancelled"
+                job.finished_at = time.time()
+                self._update(job, job.stage, "cancelled")
+            else:
+                # Shutdown: hand the job back to the queue for the next process.
+                job.status = JobStatus.QUEUED
+                self._update(job, Stage.QUEUED, "interrupted by shutdown; will resume on restart")
             raise
         except Exception as exc:
             log.exception("job %s failed", job.id)
             job.status = JobStatus.FAILED
             job.error = str(exc)
+            job.finished_at = time.time()
             self._update(job, job.stage, f"failed: {exc}")
         finally:
-            job.finished_at = time.time()
+            if job.status is JobStatus.SUCCEEDED and job.finished_at is None:
+                job.finished_at = time.time()
+            self.on_update(job)
             (job_dir / "job.json").write_text(job.model_dump_json(indent=1))
         return job
 
@@ -169,11 +183,18 @@ class Pipeline:
     async def _run_generative(self, job: Job, job_dir: Path) -> None:
         assert job.routing is not None
         order = [job.routing.selected, *job.routing.fallbacks]
+        # Attempts from an earlier, interrupted run stay in the history but do not
+        # count against this run's budget.
+        start = len(job.attempts)
+
+        def used() -> int:
+            return len(job.attempts) - start
+
         for model_id in order:
-            if len(job.attempts) >= self.max_attempts:
+            if used() >= self.max_attempts:
                 break
             retries = 0
-            while len(job.attempts) < self.max_attempts:
+            while used() < self.max_attempts:
                 attempt_dir = job_dir / f"attempt-{len(job.attempts) + 1}"
                 outcome = await self._attempt(job, model_id, attempt_dir)
                 if outcome == "ok":
@@ -183,10 +204,11 @@ class Pipeline:
                     self._update(job, Stage.GENERATING, f"retrying {model_id} after transient error")
                     continue
                 break
-            if len(job.attempts) < self.max_attempts and model_id != order[-1]:
+            if used() < self.max_attempts and model_id != order[-1]:
                 self._update(job, Stage.GENERATING, f"{model_id} failed; trying fallback")
-        errors = "; ".join(f"{a.model_id}: {a.error}" for a in job.attempts)
-        raise RuntimeError(f"all {len(job.attempts)} attempts failed ({errors})")
+        failed = job.attempts[start:]
+        errors = "; ".join(f"{a.model_id}: {a.error}" for a in failed)
+        raise RuntimeError(f"all {len(failed)} attempts failed ({errors})")
 
     async def _attempt(self, job: Job, model_id: str, attempt_dir: Path) -> str:
         spec = self.registry.get(model_id)
@@ -287,4 +309,5 @@ class Pipeline:
             result_dir=str(result_dir),
         )
         job.status = JobStatus.SUCCEEDED
+        job.finished_at = time.time()
         self._update(job, Stage.DONE, f"done (validation score {validation.score:.2f})")

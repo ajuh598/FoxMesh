@@ -4,6 +4,7 @@
     foxmesh analyze "게임에 사용할 중세풍 검을 만들어 줘"
     foxmesh run "3D 프린팅용 10cm 컵" [--profile print_3d]
     foxmesh models
+    foxmesh bench [--model ID] [--repeats N]
 """
 
 from __future__ import annotations
@@ -56,6 +57,25 @@ def cmd_run(args: argparse.Namespace) -> int:
     return asyncio.run(_run())
 
 
+def cmd_bench(args: argparse.Namespace) -> int:
+    async def _run() -> int:
+        services = build_services()
+        run = services.benchmarks.start(args.model or None, args.case or None, args.repeats)
+        run = await services.benchmarks.wait()
+        services.store.close()
+        print(f"benchmark {run.id}: {run.status}" + (f" ({run.error})" if run.error else ""))
+        print(f"{'model':<24} {'runs':>4} {'ok':>6} {'mean gen':>9} {'p90 gen':>9} {'score':>6}")
+        for s in run.summary:
+            fmt = lambda v: f"{v:.2f}s" if v is not None else "-"
+            score = f"{s.mean_validation_score:.2f}" if s.mean_validation_score is not None else "-"
+            print(f"{s.model_id:<24} {s.runs:>4} {s.success_rate:>6.0%} {fmt(s.mean_generation_s):>9} "
+                  f"{fmt(s.p90_generation_s):>9} {score:>6}")
+            if s.skipped_cases:
+                print(f"{'':<24} skipped: {', '.join(s.skipped_cases)}")
+        return 0 if run.status == "done" else 1
+    return asyncio.run(_run())
+
+
 def cmd_models(args: argparse.Namespace) -> int:
     services = build_services()
     for view in services.registry.views():
@@ -83,6 +103,11 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--model", help="force a specific model id")
         p.set_defaults(func=func)
     sub.add_parser("models").set_defaults(func=cmd_models)
+    bench = sub.add_parser("bench", help="measure every available model on the benchmark set")
+    bench.add_argument("--model", action="append", help="limit to a model id (repeatable)")
+    bench.add_argument("--case", action="append", help="limit to a case id (repeatable)")
+    bench.add_argument("--repeats", type=int, default=1)
+    bench.set_defaults(func=cmd_bench)
     serve = sub.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)

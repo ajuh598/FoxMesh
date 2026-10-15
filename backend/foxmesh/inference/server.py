@@ -8,6 +8,9 @@ Run with::
 
     uvicorn foxmesh.inference.server:app --port 9000
     FOXMESH_INFERENCE_RUNNERS=mypkg.runners:TripoSRRunner,mypkg.runners:TrellisRunner
+    FOXMESH_INFERENCE_VRAM_GB=24        # evict least recently used runners beyond this
+    FOXMESH_INFERENCE_PRELOAD=triposr   # load at startup instead of on first request
+    FOXMESH_INFERENCE_IDLE_S=1800       # unload runners idle this long
 
 A runner wraps one PyTorch model::
 
@@ -34,6 +37,7 @@ import os
 import tempfile
 import time
 from abc import ABC, abstractmethod
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -130,8 +134,27 @@ class RunnerPool:
                 t0 = time.monotonic()
                 await asyncio.to_thread(runner.load)
                 runner.loaded = True
+                runner.last_used = time.time()
                 log.info("loaded %s in %.1fs", name, time.monotonic() - t0)
         return runner
+
+
+    async def preload(self, names: list[str]) -> None:
+        """Load runners up front so the first request does not pay the loading time."""
+        for name in names:
+            await self.acquire(name)
+
+    async def unload_idle(self, idle_s: float, now: float | None = None) -> list[str]:
+        """Unload runners unused for ``idle_s`` seconds, freeing VRAM for other work."""
+        now = now or time.time()
+        unloaded = []
+        async with self._load_lock:
+            for runner in self.runners.values():
+                if runner.loaded and not runner.lock.locked() and now - runner.last_used >= idle_s:
+                    await asyncio.to_thread(runner.unload)
+                    runner.loaded = False
+                    unloaded.append(runner.name)
+        return unloaded
 
 
 def _load_runner_classes(spec: str) -> list[ModelRunner]:
@@ -150,7 +173,25 @@ def create_inference_app(pool: RunnerPool | None = None) -> FastAPI:
         budget = os.environ.get("FOXMESH_INFERENCE_VRAM_GB")
         pool = RunnerPool(runners, float(budget) if budget else None)
 
-    app = FastAPI(title="FoxMesh inference")
+    preload = [n.strip() for n in os.environ.get("FOXMESH_INFERENCE_PRELOAD", "").split(",") if n.strip()]
+    idle_s = float(os.environ.get("FOXMESH_INFERENCE_IDLE_S", "0"))
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        await pool.preload(preload)
+        reaper = None
+        if idle_s > 0:
+            async def reap() -> None:
+                while True:
+                    await asyncio.sleep(min(idle_s, 60))
+                    for name in await pool.unload_idle(idle_s):
+                        log.info("unloaded idle runner %s", name)
+            reaper = asyncio.create_task(reap())
+        yield
+        if reaper:
+            reaper.cancel()
+
+    app = FastAPI(title="FoxMesh inference", lifespan=lifespan)
     app.state.pool = pool
 
     @app.get("/health")

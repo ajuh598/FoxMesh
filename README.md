@@ -22,7 +22,9 @@ AI끼리 자연어로 대화하거나 토론하는 단계는 없습니다. 모�
 | `backend/foxmesh/blender/` | Blender 자동화: 작업별 단계 선택(`planner.py`), Blender 내부 스크립트(`bpy_pipeline.py`), 별도 프로세스 실행(`worker.py`) |
 | `backend/foxmesh/validation.py` | 결과 검증: 파일 형식(내용 기반), 메시, 폴리곤 예산, 폐쇄성, 재질, UV, 크기 |
 | `backend/foxmesh/pipeline.py` | 실행 엔진: 생성 → 후처리 → 검증, 재시도와 대체 모델 |
-| `backend/foxmesh/jobs.py` | 비동기 작업 큐: 중복 요청 방지, 취소 |
+| `backend/foxmesh/jobs.py` | 비동기 작업 큐: 중복 요청 방지, 취소, 재시작 복구, 보존 기간 정리 |
+| `backend/foxmesh/store.py` | 작업 저장소: SQLite(기본) / PostgreSQL / 메모리 |
+| `backend/foxmesh/benchmark.py` | 모델별 성능 평가: 고정 테스트 세트 실행, 결과를 모델 통계에 반영 |
 | `backend/foxmesh/api/` | FastAPI HTTP API |
 | `backend/foxmesh/inference/` | GPU 추론 서버: 모델을 메모리에 유지(프로세스 재사용), VRAM 예산 내 LRU 언로드 |
 | `frontend/` | Next.js 웹: 대시보드, 생성 페이지, 작업 상세(3D 미리보기), 실행 엔진 관리 |
@@ -35,9 +37,11 @@ AI끼리 자연어로 대화하거나 토론하는 단계는 없습니다. 모�
 - 작업 유형 지원 (텍스트→3D, 이미지→3D 등)
 - 입력 지원 (이미지 작업은 이미지 입력 필수, 텍스트는 보조 정보)
 - 출력 형식: 직접 출력하거나, Blender로 변환 가능한 형식일 것
-- VRAM: 로컬 GPU 모델은 현재 사용 가능한 VRAM 이하일 것 (원격/CPU 모델은 제외)
+- VRAM: 로컬 GPU 모델은 확보 가능한 VRAM 이하일 것 (원격/CPU 모델은 제외). FoxMesh 작업이 잠시 쓰고 있는 VRAM은
+  곧 돌아오므로, 그 몫까지 합쳐 맞으면 후보에 남기고 실행 시 VRAM이 빌 때까지 기다림. 다른 프로세스가 쓰는 VRAM은 제외
 - 라이선스: 상업적 사용이 필요하면(`FOXMESH_COMMERCIAL_USE`, 기본 true) 비상업 라이선스 제외
-- 안정성: 최근 20회 중 5회 이상 실행했고 실패율이 50%를 넘으면 제외
+- 안정성(차단기): 최근 20회 중 5회 이상 실행해 실패율이 50%를 넘거나 연속 3회 실패하면 10분간 제외.
+  이후 한 번 시험 실행을 허용하고(성공하면 정상 복귀, 실패하면 다시 10분 제외), 영구 제외되지 않음
 - 마감 시간: 예상 실행 시간이 요청한 시간을 넘으면 제외
 
 제외된 모델과 이유는 모두 `RoutingDecision.rejected`에 남고 웹에 표시됩니다.
@@ -96,7 +100,21 @@ foxmesh serve --port 8000                       # API 서버
 foxmesh analyze "게임에 사용할 중세풍 검을 만들어 줘"   # 선택 과정만 확인 (실행 안 함)
 foxmesh run "3D 프린팅용 10cm 컵"                 # 한 번 실행
 foxmesh models                                  # 등록 모델과 실행 가능 여부
+foxmesh bench [--model ID] [--repeats N]        # 모델별 성능 평가
 ```
+
+주요 설정(환경 변수, 접두어 `FOXMESH_`):
+
+| 변수 | 기본값 | 설명 |
+| --- | --- | --- |
+| `DATA_DIR` | `./var` | 작업 결과, 업로드, 통계, DB 저장 위치 |
+| `DATABASE_URL` | `sqlite:///<DATA_DIR>/foxmesh.db` | 작업 저장소. `postgresql://...`(psycopg 필요) 또는 `memory://` |
+| `RETENTION_DAYS` | `30` | 끝난 작업·결과 파일·안 쓰는 업로드 보존 기간 (0이면 무기한). 1시간마다 정리 |
+| `DEDUP_TTL` | `3600` | 같은 요청에 기존 결과를 재사용하는 시간(초) |
+| `WORKERS` | `2` | 동시에 실행할 작업 수 |
+| `MAX_ATTEMPTS` / `TRANSIENT_RETRIES` | `3` / `1` | 작업당 최대 시도 수 / 일시 오류 시 같은 모델 재시도 수 |
+| `BLENDER`, `BLENDER_MODE` | PATH의 `blender`, `blender` | Blender 실행 파일, 또는 `bpy` 모드의 Python |
+| `VRAM_GB` | 자동 감지 | GPU를 감지하지 못할 때 쓸 VRAM 크기 |
 
 pip의 `bpy` 모듈(Blender 4.2는 Python 3.11 필요)을 쓸 경우:
 `FOXMESH_BLENDER=/path/to/python3.11 FOXMESH_BLENDER_MODE=bpy`.
@@ -117,7 +135,28 @@ FOXMESH_API_URL=http://127.0.0.1:8000 npm run dev   # http://localhost:3000
 cd backend
 pytest                                            # Blender 없이 전체 테스트
 FOXMESH_TEST_BLENDER=/opt/blender/blender FOXMESH_TEST_BLENDER_MODE=blender pytest tests/test_blender.py
+FOXMESH_TEST_DATABASE_URL=postgresql://postgres@localhost/foxmesh_test pytest tests/test_store.py
 ```
+
+## 성능 최적화와 안정성
+
+- **작업 저장과 복구**: 작업은 SQLite(기본) 또는 PostgreSQL에 저장되어 재시작 후에도 기록이 남습니다.
+  정상 종료 시 실행 중이던 작업은 대기열로 돌아가 다음 시작 때 이어서 실행되고, 비정상 종료로 중단된 작업은
+  한 번만 다시 실행합니다(같은 작업이 계속 서버를 죽이는 상황 방지).
+- **중복 작업 방지와 결과 캐시**: 내용이 같은 요청(공백·대소문자 무시, 이미지는 파일 해시)은 진행 중이거나
+  `DEDUP_TTL` 안에 성공한 작업을 재사용합니다. 재시작 후에도 적용되며, 결과 파일이 지워졌으면 다시 실행합니다.
+  결과 파일과 썸네일은 바뀌지 않으므로 `Cache-Control: immutable`로 내려 브라우저가 다시 받지 않습니다.
+- **보존 기간 정리**: `RETENTION_DAYS`가 지난 작업, 결과 파일, 쓰이지 않는 업로드를 1시간마다 삭제합니다.
+  `POST /api/maintenance/cleanup`으로 즉시 실행할 수 있습니다.
+- **모델별 성능 평가**: `foxmesh bench` 또는 실행 엔진 관리 페이지의 **벤치마크 실행**. 텍스트 4종·이미지 2종 테스트를
+  모델마다 1회 시도, 대체 모델 없이 실행해 성공률, 평균/P90 생성 시간, 검증 점수를 측정합니다. 결과는 모델 통계에
+  기록되어 자동 선택이 추정치 대신 실측값을 쓰게 됩니다. 모델이 지원하지 않는 작업은 건너뜁니다.
+- **VRAM 기반 실행 제한**: 로컬 GPU 모델은 실행 동안 VRAM을 예약하고, 남은 VRAM이 부족하면 빌 때까지 기다립니다.
+- **모델 프로세스 재사용**: 추론 서버는 모델을 메모리에 유지하고, VRAM 예산(`FOXMESH_INFERENCE_VRAM_GB`)을 넘으면
+  가장 오래 안 쓴 모델부터 내립니다. `FOXMESH_INFERENCE_PRELOAD`로 시작 시 미리 올리고,
+  `FOXMESH_INFERENCE_IDLE_S`가 지나도록 안 쓴 모델은 내립니다.
+- **모니터링**: `GET /api/metrics`가 Prometheus 형식으로 작업 수, 대기열, 모델별 실행·실패·평균 시간·검증 점수,
+  GPU 메모리를 내보냅니다.
 
 ## 이미지로 3D 생성
 
@@ -172,12 +211,16 @@ Hunyuan3D 같은 이미지→3D 모델을 아래 방법으로 연결하세요. �
 | `GET/POST/PATCH` | `/api/models[/{id}]` | 모델 목록·등록·활성화·버전·설정 변경 |
 | `GET/PUT/DELETE` | `/api/policies[/{profile}]` | 자동 선택 가중치 조회·변경·초기화 |
 | `GET` | `/api/system`, `/api/dashboard` | GPU·Blender·대기열 상태, 대시보드 요약 |
+| `POST` / `GET` | `/api/benchmarks[/{id}]` | 모델 벤치마크 실행 / 결과 조회 (`/api/benchmarks/cases`: 테스트 목록) |
+| `GET` | `/api/metrics` | Prometheus 지표 |
+| `POST` | `/api/maintenance/cleanup` | 보존 기간 정리 즉시 실행 |
 
 ## 개발 단계 진행 현황
 
 - [x] 1단계 자동 선택 엔진: 작업 분류, 모델 레지스트리, 후보 필터링, 점수 기반 선택, 실행 로그(`var/runs.jsonl`)
 - [x] 2단계 Blender 연동: 백그라운드 실행, 자동 불러오기, 메시·재질 검사, BLEND/GLB 출력, 썸네일 렌더링
 - [x] 3단계 웹 통합: 생성 페이지, 작업 대기열, 진행 상태, 결과 미리보기, 실행 엔진 관리
-- [~] 4단계 성능 최적화: VRAM 기반 실행 제한, 추론 서버 모델 재사용, 중복 작업 방지, 실측 성능 반영, 대체 실행 완료.
-  남은 일: 작업 상태를 Redis/PostgreSQL에 저장(현재는 메모리 + `var/` 파일), 결과 캐시 만료 정책
+- [x] 4단계 성능 최적화: VRAM 기반 실행 제한(대기 포함), 모델 프로세스 재사용(미리 올리기·유휴 언로드),
+  캐싱과 중복 작업 방지(재시작 후 유지, 보존 기간 정리), 모델별 성능 평가(벤치마크), 오류 복구(작업 저장·재시작
+  복구, 차단기)와 대체 실행. 여러 서버가 대기열을 나눠 쓰는 Redis 기반 분산 큐는 아직 없음(현재는 서버 하나에서 처리)
 - [ ] 5단계 자체 AI 개발: 자체 모델은 `ModelRunner` + JSON 설명 파일로 등록하면 자동 선택 대상에 포함됨

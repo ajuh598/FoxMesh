@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
-import { Bar, ErrorBox, formatSeconds, reasonLabel } from "@/components/ui";
-import { ModelView, PROFILE_LABELS, Profile, RoutingPolicy, api } from "@/lib/api";
+import { useEffect, useRef, useState } from "react";
+import { Bar, ErrorBox, formatSeconds, formatTime, reasonLabel } from "@/components/ui";
+import { BenchmarkRun, ModelView, PROFILE_LABELS, Profile, RoutingPolicy, api } from "@/lib/api";
 import { usePolling } from "@/lib/usePolling";
 
 const RUNTIME_LABELS = { local_gpu: "로컬 GPU", remote: "원격 서버", cpu: "CPU" } as const;
@@ -106,6 +106,82 @@ function PolicyEditor({ profile, policy, onChange }: { profile: Profile; policy:
   );
 }
 
+function BenchmarkPanel({ onFinished }: { onFinished: () => void }) {
+  const [repeats, setRepeats] = useState(1);
+  const [error, setError] = useState<string | null>(null);
+  const runs = usePolling(api.benchmarks, 1500);
+  const latest: BenchmarkRun | undefined = runs.data?.[0];
+  const running = latest?.status === "running";
+  const wasRunning = useRef(false);
+  useEffect(() => {
+    // Refresh the model list once a run finishes: its stats have changed.
+    if (wasRunning.current && !running) onFinished();
+    wasRunning.current = running;
+  }, [running, onFinished]);
+
+  async function start() {
+    try {
+      setError(null);
+      await api.startBenchmark({ repeats });
+      runs.refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  return (
+    <div className="card stack">
+      <h2>모델 성능 평가</h2>
+      <p className="small muted">
+        고정된 테스트 세트(텍스트 4종, 이미지 2종)를 실행 가능한 모든 모델에 돌려 성공률, 생성 시간, 검증 점수를
+        측정합니다. 결과는 모델 통계에 기록되어 자동 선택에 바로 반영됩니다.
+      </p>
+      <div className="row">
+        <label className="row small">
+          반복
+          <input type="number" min={1} max={20} value={repeats} style={{ width: 64 }}
+            onChange={(e) => setRepeats(Math.max(1, Number(e.target.value)))} />
+        </label>
+        <button className="primary" onClick={start} disabled={running}>
+          {running ? `실행 중 (${latest?.progress}/${latest?.total})` : "벤치마크 실행"}
+        </button>
+        {latest && !running && (
+          <span className="small muted">
+            최근 실행 {formatTime(latest.finished_at ?? latest.started_at)} ·{" "}
+            {latest.status === "done" ? "완료" : `실패: ${latest.error}`}
+          </span>
+        )}
+      </div>
+      <ErrorBox message={error} />
+      {latest && latest.summary.length > 0 && (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>모델</th><th className="num">실행</th><th className="num">성공률</th>
+                <th className="num">평균 생성</th><th className="num">P90 생성</th><th>검증 점수</th><th>건너뜀</th>
+              </tr>
+            </thead>
+            <tbody>
+              {latest.summary.map((s) => (
+                <tr key={s.model_id}>
+                  <td className="mono">{s.model_id}</td>
+                  <td className="num">{s.runs}</td>
+                  <td className="num">{s.runs ? `${Math.round(s.success_rate * 100)}%` : "—"}</td>
+                  <td className="num">{formatSeconds(s.mean_generation_s)}</td>
+                  <td className="num">{formatSeconds(s.p90_generation_s)}</td>
+                  <td>{s.mean_validation_score == null ? "—" : <Bar value={s.mean_validation_score} />}</td>
+                  <td className="small muted">{s.skipped_cases.length ? `${s.skipped_cases.length}개 (미지원 작업)` : ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function EnginesPage() {
   const models = usePolling(api.models, 5000);
   const policies = usePolling(api.policies, 60000);
@@ -114,6 +190,7 @@ export default function EnginesPage() {
     <div className="stack">
       <h1>실행 엔진 관리</h1>
       <ErrorBox message={models.error} />
+      <BenchmarkPanel onFinished={models.refresh} />
       {models.data?.map((view) => (
         <ModelRow key={view.spec.id} view={view} onChange={models.refresh} />
       ))}

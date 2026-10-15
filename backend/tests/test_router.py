@@ -70,6 +70,22 @@ def test_vram_uses_current_free_memory(registry):
     assert any("10 GB free" in x for x in reasons(d, "big"))
 
 
+def test_vram_held_by_own_jobs_means_wait_not_reject(registry):
+    import asyncio
+
+    registry.register(make_model("big", vram_gb=16))
+    gpu = fixed_gpu(24)
+
+    async def scenario():
+        async with gpu.reserve(12):
+            # 12 GB free now, but 24 GB once our own job finishes: keep "big" and wait.
+            d = router(registry, gpu=gpu).route(task())
+            assert d.selected == "big"
+            assert any("waits for 16 GB" in w for w in d.warnings)
+
+    asyncio.run(scenario())
+
+
 def test_remote_and_cpu_models_skip_vram_check(registry):
     registry.register(make_model("remote", runtime="remote", vram_gb=40))
     d = router(registry, gpu=fixed_gpu(0)).route(task())
@@ -81,6 +97,39 @@ def test_failure_rate_excludes_model(registry):
     registry.register(make_model("steady", quality=QualityPriors(accuracy=0.4, mesh=0.4, texture=0.4)))
     for _ in range(6):
         registry.stats.record("flaky", ok=False, runtime_s=None, error="boom")
+    d = router(registry).route(task())
+    assert d.selected == "steady"
+    assert any("in a row" in x and "cooling down" in x for x in reasons(d, "flaky"))
+
+
+def test_breaker_reopens_for_a_trial_after_cooldown(registry):
+    import time as _time
+
+    from foxmesh.router import COOLDOWN_S
+
+    registry.register(make_model("flaky"))
+    for ok in (True, True, False, False, False):
+        registry.stats.record("flaky", ok=ok, runtime_s=10 if ok else None)
+    last = registry.stats.get("flaky").last_run_at
+    r = router(registry)
+    r.clock = lambda: last + 60
+    with pytest.raises(NoCandidateError):
+        r.route(task())
+    # After the cooldown the model gets one trial run, flagged in the warnings.
+    r.clock = lambda: last + COOLDOWN_S + 1
+    d = r.route(task())
+    assert d.selected == "flaky" and any("trial run" in w for w in d.warnings)
+    # A success closes the breaker again.
+    registry.stats.record("flaky", ok=True, runtime_s=10)
+    r.clock = _time.time
+    assert not router(registry).route(task()).warnings
+
+
+def test_failure_rate_trips_without_a_streak(registry):
+    registry.register(make_model("flaky"))
+    registry.register(make_model("steady", quality=QualityPriors(accuracy=0.4, mesh=0.4, texture=0.4)))
+    for ok in (False, True, False, False, True, False, False, True, False):
+        registry.stats.record("flaky", ok=ok, runtime_s=1 if ok else None)
     d = router(registry).route(task())
     assert d.selected == "steady"
     assert any("failure rate" in x for x in reasons(d, "flaky"))

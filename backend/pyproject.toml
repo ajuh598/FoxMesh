@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+postgres = ["psycopg[binary]>=3.1"]
 
 [project.scripts]
 foxmesh = "foxmesh.cli:main"

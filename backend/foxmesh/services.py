@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .adapters import AdapterRegistry
+from .benchmark import BenchmarkManager
 from .blender import BlenderWorker, LitePostProcessor
 from .config import Settings
 from .gpu import GpuMonitor
@@ -12,6 +13,7 @@ from .jobs import JobManager
 from .pipeline import Pipeline
 from .registry import ModelRegistry, StatsStore
 from .router import PolicyStore, Router
+from .store import JobStore, open_store
 
 
 @dataclass
@@ -23,7 +25,9 @@ class Services:
     policies: PolicyStore
     router: Router
     pipeline: Pipeline
+    store: JobStore
     jobs: JobManager
+    benchmarks: BenchmarkManager
 
 
 def build_services(
@@ -54,8 +58,13 @@ def build_services(
         max_attempts=settings.max_attempts, transient_retries=settings.transient_retries,
         generation_timeout_s=settings.generation_timeout_s,
     )
+    store = open_store(settings.database_url, settings.data_dir)
     jobs = JobManager(
-        pipeline, settings.uploads_dir, concurrency=settings.worker_concurrency,
+        pipeline, settings.uploads_dir, store=store, concurrency=settings.worker_concurrency,
         dedup_ttl_s=settings.dedup_ttl_s, commercial_use=settings.commercial_use,
+        retention_s=settings.retention_days * 86400 if settings.retention_days > 0 else None,
     )
-    return Services(settings, adapters, registry, gpu, policies, router, pipeline, jobs)
+    benchmarks = BenchmarkManager(registry, adapters, router, gpu, postprocessor, settings.data_dir,
+                                  commercial_use=settings.commercial_use)
+    return Services(settings, adapters, registry, gpu, policies, router, pipeline, store, jobs,
+                    benchmarks)

@@ -10,11 +10,12 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from PIL import Image
 from pydantic import BaseModel, Field
 
 from .. import __version__
+from ..benchmark import DEFAULT_CASES, BenchmarkCase, BenchmarkRun
 from ..classifier import analyze
 from ..jobs import UnknownUpload
 from ..pipeline import Job, JobStatus
@@ -25,6 +26,7 @@ from ..services import Services, build_services
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 UPLOAD_EXTENSIONS = IMAGE_EXTENSIONS | {".glb", ".gltf", ".obj", ".fbx", ".stl", ".ply", ".blend"}
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
+IMMUTABLE = "public, max-age=31536000, immutable"
 
 
 class SubmitResponse(BaseModel):
@@ -46,6 +48,12 @@ class ModelUpdate(BaseModel):
     config: dict[str, Any] | None = None
 
 
+class BenchmarkRequest(BaseModel):
+    model_ids: list[str] | None = None
+    case_ids: list[str] | None = None
+    repeats: int = Field(1, ge=1, le=20)
+
+
 class UploadResponse(BaseModel):
     id: str
     filename: str
@@ -59,7 +67,9 @@ def create_app(services: Services | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         await services.jobs.start()
         yield
+        await services.benchmarks.stop()
         await services.jobs.stop()
+        services.store.close()
 
     app = FastAPI(title="FoxMesh", version=__version__, lifespan=lifespan)
     app.state.services = services
@@ -93,15 +103,11 @@ def create_app(services: Services | None = None) -> FastAPI:
 
     @app.get("/api/dashboard")
     def dashboard() -> dict[str, Any]:
-        jobs = services.jobs.list(limit=1000)
-        counts = {status.value: 0 for status in JobStatus}
-        for job in jobs:
-            counts[job.status.value] += 1
         models = services.registry.views()
         return {
-            "jobs": counts,
-            "recent_jobs": [_job_summary(j) for j in jobs[:10]],
-            "recent_errors": [_job_summary(j) for j in jobs if j.status is JobStatus.FAILED][:10],
+            "jobs": services.jobs.counts(),
+            "recent_jobs": [_job_summary(j) for j in services.jobs.list(10)],
+            "recent_errors": [_job_summary(j) for j in services.jobs.list(10, JobStatus.FAILED)],
             "models": [{
                 "id": v.spec.id, "name": v.spec.name, "available": v.available,
                 "runs": v.stats.runs, "failure_rate": v.stats.recent_failure_rate,
@@ -150,7 +156,7 @@ def create_app(services: Services | None = None) -> FastAPI:
             raise HTTPException(404, "upload not found") from exc
         if Path(path).suffix.lower() not in IMAGE_EXTENSIONS:
             raise HTTPException(404, "upload not found")
-        return FileResponse(path)
+        return FileResponse(path, headers={"Cache-Control": IMMUTABLE})
 
     # -- analysis & jobs -----------------------------------------------------------
 
@@ -171,8 +177,11 @@ def create_app(services: Services | None = None) -> FastAPI:
         except NoCandidateError as exc:
             return AnalyzeResponse(spec=spec, routing=exc.decision, error=str(exc))
 
+    # Handlers that touch the job queue or asyncio tasks are ``async def`` so they run on
+    # the event loop; plain ``def`` handlers run in a thread pool, where asyncio objects
+    # must not be used.
     @app.post("/api/jobs", response_model=SubmitResponse, status_code=202)
-    def submit(body: JobRequest) -> SubmitResponse:
+    async def submit(body: JobRequest) -> SubmitResponse:
         if not body.prompt.strip() and not body.image_id and not body.input_mesh_id:
             raise HTTPException(400, "provide a prompt, an image or an input 3D file")
         try:
@@ -182,17 +191,24 @@ def create_app(services: Services | None = None) -> FastAPI:
         return SubmitResponse(job=job, deduplicated=dedup)
 
     @app.get("/api/jobs")
-    def list_jobs(limit: int = Query(50, ge=1, le=500)) -> list[dict[str, Any]]:
-        return [_job_summary(j) for j in services.jobs.list(limit)]
+    def list_jobs(
+        limit: int = Query(50, ge=1, le=500), status: JobStatus | None = None,
+    ) -> list[dict[str, Any]]:
+        return [_job_summary(j) for j in services.jobs.list(limit, status)]
 
     @app.get("/api/jobs/{job_id}", response_model=Job)
     def get_job(job_id: str) -> Job:
         return _job_or_404(job_id)
 
     @app.post("/api/jobs/{job_id}/cancel", response_model=Job)
-    def cancel_job(job_id: str) -> Job:
+    async def cancel_job(job_id: str) -> Job:
         _job_or_404(job_id)
         return services.jobs.cancel(job_id)
+
+    @app.post("/api/maintenance/cleanup")
+    def cleanup() -> dict[str, int]:
+        """Apply the retention policy now (it also runs hourly)."""
+        return services.jobs.cleanup()
 
     @app.get("/api/jobs/{job_id}/files/{name}")
     def job_file(job_id: str, name: str) -> FileResponse:
@@ -205,7 +221,8 @@ def create_app(services: Services | None = None) -> FastAPI:
         path = Path(job.result.result_dir) / name
         if not path.is_file():
             raise HTTPException(404, "file not found")
-        return FileResponse(path, filename=name)
+        # A job's results never change after it finishes, so browsers and proxies may keep them.
+        return FileResponse(path, filename=name, headers={"Cache-Control": IMMUTABLE})
 
     # -- models (execution engine management) ---------------------------------------
 
@@ -241,6 +258,72 @@ def create_app(services: Services | None = None) -> FastAPI:
             raise HTTPException(404, "model not found")
         services.registry.stats.reset(model_id)
         return services.registry.view(model_id)
+
+    # -- benchmarks (model performance evaluation) -------------------------------------
+
+    @app.get("/api/benchmarks/cases", response_model=list[BenchmarkCase])
+    def benchmark_cases() -> list[BenchmarkCase]:
+        return DEFAULT_CASES
+
+    @app.post("/api/benchmarks", response_model=BenchmarkRun, status_code=202)
+    async def start_benchmark(body: BenchmarkRequest) -> BenchmarkRun:
+        try:
+            return services.benchmarks.start(body.model_ids, body.case_ids, body.repeats)
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.get("/api/benchmarks", response_model=list[BenchmarkRun])
+    def list_benchmarks(limit: int = Query(20, ge=1, le=100)) -> list[BenchmarkRun]:
+        return services.benchmarks.list(limit)
+
+    @app.get("/api/benchmarks/{run_id}", response_model=BenchmarkRun)
+    def get_benchmark(run_id: str) -> BenchmarkRun:
+        run = services.benchmarks.get(run_id)
+        if run is None:
+            raise HTTPException(404, "benchmark not found")
+        return run
+
+    # -- monitoring ----------------------------------------------------------------------
+
+    @app.get("/api/metrics", response_class=PlainTextResponse)
+    def metrics() -> str:
+        """Prometheus text format: jobs, queue, per-model runs/failures/latency, GPU memory."""
+        lines: list[str] = []
+
+        def metric(name: str, kind: str, help_: str, samples: list[tuple[dict[str, str], float]]):
+            lines.append(f"# HELP foxmesh_{name} {help_}")
+            lines.append(f"# TYPE foxmesh_{name} {kind}")
+            for labels, value in samples:
+                label = ",".join(f'{k}="{v}"' for k, v in labels.items())
+                lines.append(f"foxmesh_{name}{{{label}}} {value}" if label else f"foxmesh_{name} {value}")
+
+        metric("jobs", "gauge", "Stored jobs by status.",
+               [({"status": k}, v) for k, v in services.jobs.counts().items()])
+        metric("queue_jobs", "gauge", "Jobs waiting in this process.", [({}, services.jobs.queue_size)])
+        metric("running_jobs", "gauge", "Jobs running in this process.", [({}, services.jobs.running_count)])
+        views = services.registry.views()
+        metric("model_available", "gauge", "1 if the model can run now.",
+               [({"model": v.spec.id}, int(v.available)) for v in views])
+        metric("model_runs_total", "counter", "Recorded model runs.",
+               [({"model": v.spec.id}, v.stats.runs) for v in views])
+        metric("model_failures_total", "counter", "Recorded model failures.",
+               [({"model": v.spec.id}, v.stats.failures) for v in views])
+        metric("model_runtime_seconds", "gauge", "Mean measured generation time.",
+               [({"model": v.spec.id}, v.stats.mean_runtime_s) for v in views
+                if v.stats.mean_runtime_s is not None])
+        metric("model_validation_score", "gauge", "Mean validation score.",
+               [({"model": v.spec.id}, v.stats.mean_validation_score) for v in views
+                if v.stats.mean_validation_score is not None])
+        gpu = services.gpu.snapshot()
+        metric("gpu_vram_total_gb", "gauge", "GPU memory.", [({}, gpu.total_vram_gb)])
+        metric("gpu_vram_free_gb", "gauge", "Schedulable GPU memory.", [({}, gpu.free_vram_gb)])
+        metric("gpu_vram_reserved_gb", "gauge", "GPU memory reserved by running jobs.",
+               [({}, gpu.reserved_vram_gb)])
+        metric("blender_available", "gauge", "1 if Blender post-processing is available.",
+               [({}, int(services.settings.blender_available))])
+        return "\n".join(lines) + "\n"
 
     # -- routing policies ------------------------------------------------------------
 
