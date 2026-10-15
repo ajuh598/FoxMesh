@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { GpuMeter } from "@/components/GpuMeter";
 import { ErrorBox, StatusBadge, formatSeconds, formatTime } from "@/components/ui";
-import { PROFILE_LABELS, api } from "@/lib/api";
+import { PROFILE_LABELS, api, jobTitle } from "@/lib/api";
 import { usePolling } from "@/lib/usePolling";
 
 export default function DashboardPage() {
@@ -79,7 +79,7 @@ export default function DashboardPage() {
                         <td>
                           {j.thumbnail ? <img className="thumb" src={api.fileUrl(j.id, j.thumbnail)} alt="" /> : <div className="thumb" />}
                         </td>
-                        <td><Link href={`/jobs/${j.id}`}>{j.prompt || j.task_type}</Link></td>
+                        <td><Link href={`/jobs/${j.id}`}>{jobTitle(j.prompt, j.task_type)}</Link></td>
                         <td className="small">{PROFILE_LABELS[j.profile]}</td>
                         <td className="small mono">{j.model_id ?? "—"}</td>
                         <td><StatusBadge status={j.status} /></td>
@@ -99,7 +99,7 @@ export default function DashboardPage() {
               <ul className="small">
                 {data.recent_errors.map((j) => (
                   <li key={j.id}>
-                    <Link href={`/jobs/${j.id}`}>{j.prompt || j.id}</Link>: {j.error}
+                    <Link href={`/jobs/${j.id}`}>{jobTitle(j.prompt, j.task_type)}</Link>: {j.error}
                   </li>
                 ))}
               </ul>

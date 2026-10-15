@@ -1,0 +1,20 @@
+{
+  "id": "image-relief",
+  "name": "Image Relief (built-in)",
+  "version": "1.0.0",
+  "adapter": "image_relief",
+  "description": "Built-in CPU image-to-3D: removes the background and builds a closed, textured 2.5D mesh from the silhouette (inflate, relief or extrude). Not a full 3D reconstruction; connect TripoSR/TRELLIS for that.",
+  "tasks": ["image_to_3d"],
+  "inputs": ["image", "text"],
+  "outputs": ["glb", "obj"],
+  "runtime": "cpu",
+  "vram_gb": 0,
+  "est_runtime_s": 2,
+  "quality": {"accuracy": 0.45, "mesh": 0.55, "texture": 0.7},
+  "topology": "dense",
+  "watertight": true,
+  "produces_textures": true,
+  "license": "Apache-2.0 (FoxMesh)",
+  "commercial_use": true,
+  "enabled": true
+}

@@ -29,6 +29,20 @@ export const STAGE_LABELS: Record<string, string> = {
   done: "완료",
 };
 
+const TASK_LABELS: Record<string, string> = {
+  generate_3d: "텍스트로 3D 생성",
+  image_to_3d: "이미지로 3D 생성",
+  edit_3d: "3D 모델 편집",
+  texture: "재질·텍스처 처리",
+  convert: "형식 변환",
+  preview: "미리보기 렌더링",
+};
+
+/** Title for a job: its prompt, or a readable task name when there is none. */
+export function jobTitle(prompt: string, taskType: string) {
+  return prompt || TASK_LABELS[taskType] || taskType;
+}
+
 export const FORMATS: OutputFormat[] = ["glb", "obj", "fbx", "stl", "ply", "blend"];
 
 export interface JobRequest {
@@ -122,6 +136,7 @@ export interface Job {
   id: string;
   status: JobStatus;
   stage: string;
+  request: JobRequest;
   spec: TaskSpec;
   routing: RoutingDecision | null;
   attempts: Attempt[];
@@ -275,5 +290,6 @@ export const api = {
     if (!res.ok) throw new Error(`${res.status}: ${(await res.json()).detail ?? res.statusText}`);
     return res.json();
   },
+  uploadUrl: (uploadId: string) => `/api/uploads/${encodeURIComponent(uploadId)}`,
   fileUrl: (jobId: string, name: string) => `/api/jobs/${jobId}/files/${encodeURIComponent(name)}`,
 };

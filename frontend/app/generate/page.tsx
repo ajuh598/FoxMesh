@@ -15,6 +15,7 @@ export default function GeneratePage() {
   const [prompt, setPrompt] = useState("");
   const [profile, setProfile] = useState<Profile | "">("");
   const [image, setImage] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [mesh, setMesh] = useState<File | null>(null);
   const [advanced, setAdvanced] = useState(false);
   const [modelId, setModelId] = useState("");
@@ -25,6 +26,16 @@ export default function GeneratePage() {
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!image) {
+      setImagePreview(null);
+      return;
+    }
+    const url = URL.createObjectURL(image);
+    setImagePreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [image]);
 
   useEffect(() => {
     if (advanced && models.length === 0) api.models().then(setModels).catch(() => {});
@@ -81,7 +92,7 @@ export default function GeneratePage() {
         </label>
         <div className="row">
           <label className="field">
-            참고 이미지
+            이미지로 3D 생성 (PNG·JPG·WebP)
             <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(e) => setImage(e.target.files?.[0] ?? null)} />
           </label>
           <label className="field">
@@ -98,6 +109,17 @@ export default function GeneratePage() {
             </select>
           </label>
         </div>
+
+        {imagePreview && (
+          <div className="row" style={{ alignItems: "flex-start" }}>
+            <img src={imagePreview} alt="입력 이미지" className="input-preview" />
+            <div className="small muted" style={{ flex: 1, minWidth: 200 }}>
+              배경을 자동으로 제거하고 물체의 윤곽으로 입체 모델을 만듭니다. 배경이 단색이거나 투명한 PNG일 때
+              가장 잘 됩니다. 설명에 <strong>부조</strong>(높이맵), <strong>로고·키링</strong>(평면 돌출),
+              <strong> 인형·통통</strong>(부풀리기, 기본값)을 넣어 형태를 고를 수 있습니다. 이미지만 넣어도 생성됩니다.
+            </div>
+          </div>
+        )}
 
         <details open={advanced} onToggle={(e) => setAdvanced((e.target as HTMLDetailsElement).open)}>
           <summary>고급 설정 (수동 모델 선택)</summary>

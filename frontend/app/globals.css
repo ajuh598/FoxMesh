@@ -155,5 +155,6 @@ label.field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; 
 .timeline .badge { flex-shrink: 0; align-self: flex-start; }
 
 .thumb { width: 48px; height: 48px; object-fit: contain; background: var(--surface-2); border-radius: 6px; }
+.input-preview { width: 160px; max-width: 40%; aspect-ratio: 1; object-fit: contain; background: var(--surface-2); border-radius: 8px; }
 .viewer { width: 100%; height: 380px; background: var(--surface-2); border-radius: var(--radius); }
 details summary { cursor: pointer; color: var(--muted); }

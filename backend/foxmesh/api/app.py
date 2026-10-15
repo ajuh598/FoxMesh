@@ -11,6 +11,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from PIL import Image
 from pydantic import BaseModel, Field
 
 from .. import __version__
@@ -21,8 +22,8 @@ from ..router import NoCandidateError
 from ..schemas import JobRequest, ModelSpec, ModelView, Profile, RoutingDecision, RoutingPolicy, TaskSpec
 from ..services import Services, build_services
 
-UPLOAD_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".glb", ".gltf", ".obj", ".fbx", ".stl",
-                     ".ply", ".blend"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+UPLOAD_EXTENSIONS = IMAGE_EXTENSIONS | {".glb", ".gltf", ".obj", ".fbx", ".stl", ".ply", ".blend"}
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 
 
@@ -130,7 +131,26 @@ def create_app(services: Services | None = None) -> FastAPI:
         if size == 0:
             path.unlink(missing_ok=True)
             raise HTTPException(400, "empty upload")
+        if ext in IMAGE_EXTENSIONS:
+            # Reject undecodable images now rather than as a failed job later.
+            try:
+                with Image.open(path) as img:
+                    img.verify()
+            except Exception as exc:
+                path.unlink(missing_ok=True)
+                raise HTTPException(400, f"not a valid image: {exc}") from exc
         return UploadResponse(id=upload_id, filename=filename, size=size)
+
+    @app.get("/api/uploads/{upload_id}")
+    def get_upload(upload_id: str) -> FileResponse:
+        """Serve an uploaded reference image (for previews)."""
+        try:
+            path = services.jobs.resolve_upload(upload_id)
+        except UnknownUpload as exc:
+            raise HTTPException(404, "upload not found") from exc
+        if Path(path).suffix.lower() not in IMAGE_EXTENSIONS:
+            raise HTTPException(404, "upload not found")
+        return FileResponse(path)
 
     # -- analysis & jobs -----------------------------------------------------------
 

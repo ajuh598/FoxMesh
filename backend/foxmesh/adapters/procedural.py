@@ -6,84 +6,15 @@ runs end to end on any machine, and serves as a last-resort fallback model.
 
 from __future__ import annotations
 
-import json
 import math
-import struct
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
 from ..schemas import ModelSpec, OutputFormat, TaskSpec
 from .base import GenerationAdapter, GenerationResult
+from .mesh import Mesh, Vec
 
-Vec = tuple[float, float, float]
-
-
-@dataclass
-class Mesh:
-    vertices: list[Vec] = field(default_factory=list)
-    faces: list[tuple[int, ...]] = field(default_factory=list)  # 0-based, CCW from outside
-    parts: list[str] = field(default_factory=list)
-
-    def add(self, other: "Mesh", name: str) -> "Mesh":
-        offset = len(self.vertices)
-        self.vertices.extend(other.vertices)
-        self.faces.extend(tuple(i + offset for i in f) for f in other.faces)
-        self.parts.append(name)
-        return self
-
-    def write_obj(self, path: Path) -> None:
-        # Built Z-up; OBJ convention is Y-up (-Z forward), so rotate -90 degrees about X.
-        lines = ["# FoxMesh procedural generator"]
-        lines += [f"v {x:.6f} {z:.6f} {-y:.6f}" for x, y, z in self.vertices]
-        lines += ["f " + " ".join(str(i + 1) for i in f) for f in self.faces]
-        path.write_text("\n".join(lines) + "\n")
-
-    def write_glb(self, path: Path) -> None:
-        """Minimal binary glTF: indexed triangles with one grey PBR material.
-
-        Vertices stay shared so the mesh keeps its connectivity (watertightness,
-        UV islands). Normals are omitted; glTF loaders then shade flat.
-        """
-        # glTF is Y-up like OBJ: same -90 degree rotation about X.
-        positions = [c for x, y, z in self.vertices for c in (x, z, -y)]
-        indices = [i for face in self.faces for k in range(1, len(face) - 1)
-                   for i in (face[0], face[k], face[k + 1])]
-        count = len(self.vertices)
-        pos_bytes = struct.pack(f"<{len(positions)}f", *positions)
-        idx_bytes = struct.pack(f"<{len(indices)}I", *indices)
-        lo = [min(positions[k::3]) for k in range(3)]
-        hi = [max(positions[k::3]) for k in range(3)]
-        gltf = {
-            "asset": {"version": "2.0", "generator": "FoxMesh procedural"},
-            "scene": 0, "scenes": [{"nodes": [0]}], "nodes": [{"mesh": 0, "name": "model"}],
-            "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1,
-                                        "material": 0, "mode": 4}]}],
-            "materials": [{"name": "FoxMesh_Default", "pbrMetallicRoughness": {
-                "baseColorFactor": [0.62, 0.62, 0.65, 1.0], "metallicFactor": 0.0,
-                "roughnessFactor": 0.55}}],
-            "buffers": [{"byteLength": len(pos_bytes) + len(idx_bytes)}],
-            "bufferViews": [
-                {"buffer": 0, "byteOffset": 0, "byteLength": len(pos_bytes), "target": 34962},
-                {"buffer": 0, "byteOffset": len(pos_bytes), "byteLength": len(idx_bytes),
-                 "target": 34963},
-            ],
-            "accessors": [
-                {"bufferView": 0, "componentType": 5126, "count": count, "type": "VEC3",
-                 "min": lo, "max": hi},
-                {"bufferView": 1, "componentType": 5125, "count": len(indices), "type": "SCALAR"},
-            ],
-        }
-        json_chunk = json.dumps(gltf, separators=(",", ":")).encode()
-        json_chunk += b" " * (-len(json_chunk) % 4)
-        bin_chunk = pos_bytes + idx_bytes
-        bin_chunk += b"\0" * (-len(bin_chunk) % 4)
-        total = 12 + 8 + len(json_chunk) + 8 + len(bin_chunk)
-        with path.open("wb") as fh:
-            fh.write(struct.pack("<4sII", b"glTF", 2, total))
-            fh.write(struct.pack("<I4s", len(json_chunk), b"JSON") + json_chunk)
-            fh.write(struct.pack("<I4s", len(bin_chunk), b"BIN\0") + bin_chunk)
-
+__all__ = ["Mesh", "ProceduralAdapter", "box", "frustum", "generate_mesh", "sphere"]
 
 def box(size: Vec, center: Vec = (0, 0, 0)) -> Mesh:
     sx, sy, sz = (s / 2 for s in size)

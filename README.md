@@ -18,7 +18,7 @@ AI끼리 자연어로 대화하거나 토론하는 단계는 없습니다. 모�
 | `backend/foxmesh/registry/` | AI 모델 레지스트리. 모델 하나 = JSON 파일 하나(`registry/models/*.json`). 실행 통계(실행 수, 실패율, 평균 시간, 검증 점수)를 실제 로그로 누적 |
 | `backend/foxmesh/router.py` | 작업 라우팅 엔진. 필수 조건 필터 후 가중 점수로 선택 |
 | `backend/foxmesh/gpu.py` | `nvidia-smi` 기반 VRAM 모니터링과 작업별 VRAM 예약 |
-| `backend/foxmesh/adapters/` | 모델 실행 어댑터: 내장 절차적 생성기(CPU), GPU 추론 서버용 HTTP 어댑터, entry point 플러그인 |
+| `backend/foxmesh/adapters/` | 모델 실행 어댑터: 내장 절차적 생성기(CPU), 내장 이미지→3D(CPU), GPU 추론 서버용 HTTP 어댑터, entry point 플러그인 |
 | `backend/foxmesh/blender/` | Blender 자동화: 작업별 단계 선택(`planner.py`), Blender 내부 스크립트(`bpy_pipeline.py`), 별도 프로세스 실행(`worker.py`) |
 | `backend/foxmesh/validation.py` | 결과 검증: 파일 형식(내용 기반), 메시, 폴리곤 예산, 폐쇄성, 재질, UV, 크기 |
 | `backend/foxmesh/pipeline.py` | 실행 엔진: 생성 → 후처리 → 검증, 재시도와 대체 모델 |
@@ -119,10 +119,31 @@ pytest                                            # Blender 없이 전체 테스
 FOXMESH_TEST_BLENDER=/opt/blender/blender FOXMESH_TEST_BLENDER_MODE=blender pytest tests/test_blender.py
 ```
 
+## 이미지로 3D 생성
+
+생성 페이지에서 이미지(PNG·JPG·WebP)를 올리면 작업이 `image_to_3d`로 분류되고, 이미지 입력을 받는 모델 중에서
+자동 선택됩니다. 프롬프트는 없어도 됩니다.
+
+GPU 모델이 연결되지 않은 기본 상태에서는 내장 **Image Relief** 모델(`adapters/image_relief.py`, CPU, 약 0.3~1초)이
+실행됩니다.
+
+1. 배경 제거: 투명 PNG는 알파 채널, 그 외에는 테두리 색을 배경으로 보고 색 거리 + Otsu 임계값으로 분리.
+   배경이 단색이 아니면 이미지 전체를 사용(부조 모드)
+2. 마스크 정리: 가장 큰 덩어리만 남기고 구멍을 메우고, 꼭짓점으로만 닿는 칸을 없애 메시가 항상 닫히도록 처리
+3. 형태: 설명의 단어로 선택
+   - **부풀리기** (기본, `인형`·`통통`): 윤곽까지의 거리로 둥근 단면을 만든 입체
+   - **부조** (`부조`·`높이맵`·`리토판`): 뒷면은 평평하고 앞면은 이미지 밝기로 높낮이
+   - **돌출** (`로고`·`키링`·`간판`·`평면`): 일정 두께의 판
+4. 윤곽선을 매끄럽게 다듬고, 이미지를 앞·뒷면 텍스처로 입혀 GLB(텍스처 포함) 또는 OBJ+MTL+PNG로 출력
+5. 폴리곤 예산(게임용 기본 2만)과 크기(예: `5cm`)를 반영하고, 이후 일반 작업처럼 Blender 후처리와 검증을 거침
+
+이 방식은 윤곽 기반 2.5D 모델이라 보이지 않는 뒷면을 추정하지 않습니다. 실제 3D 복원이 필요하면 TripoSR·TRELLIS·
+Hunyuan3D 같은 이미지→3D 모델을 아래 방법으로 연결하세요. 정확도 점수가 더 높아 연결되면 자동으로 우선 선택됩니다.
+
 ## 실제 AI 모델 연결
 
-기본 상태에서는 내장 **절차적 생성기**(키워드로 검·테이블·의자·나무·집 등 기본 형상 조립)만 활성화되어 있어
-GPU 없이 전체 흐름을 확인할 수 있습니다. Shap-E, TripoSR, TRELLIS, Hunyuan3D 2.0 설명 파일이 함께 등록되어
+기본 상태에서는 내장 **절차적 생성기**(키워드로 검·테이블·의자·나무·집 등 기본 형상 조립)와 내장 **Image Relief**
+(이미지→2.5D)만 활성화되어 있어 GPU 없이 전체 흐름을 확인할 수 있습니다. Shap-E, TripoSR, TRELLIS, Hunyuan3D 2.0 설명 파일이 함께 등록되어
 있지만 비활성 상태입니다. 이 파일들의 실행 시간·VRAM·품질 값은 **초기 추정치**이며, 실제 실행 로그가 쌓이면
 라우터는 실측값을 사용합니다. 라이선스는 사용 전에 반드시 직접 확인하세요.
 
@@ -146,7 +167,8 @@ GPU 없이 전체 흐름을 확인할 수 있습니다. Shap-E, TripoSR, TRELLIS
 | `GET` | `/api/jobs`, `/api/jobs/{id}` | 작업 목록 / 상세(진행 단계, 선택 근거, 시도 기록, 검증 결과) |
 | `POST` | `/api/jobs/{id}/cancel` | 작업 취소 |
 | `GET` | `/api/jobs/{id}/files/{name}` | 결과 파일 다운로드 |
-| `PUT` | `/api/uploads?filename=` | 이미지·3D 파일 업로드 (본문에 파일 바이트) |
+| `PUT` | `/api/uploads?filename=` | 이미지·3D 파일 업로드 (본문에 파일 바이트, 이미지는 디코딩 검사) |
+| `GET` | `/api/uploads/{id}` | 업로드한 이미지 보기 (미리보기용) |
 | `GET/POST/PATCH` | `/api/models[/{id}]` | 모델 목록·등록·활성화·버전·설정 변경 |
 | `GET/PUT/DELETE` | `/api/policies[/{profile}]` | 자동 선택 가중치 조회·변경·초기화 |
 | `GET` | `/api/system`, `/api/dashboard` | GPU·Blender·대기열 상태, 대시보드 요약 |

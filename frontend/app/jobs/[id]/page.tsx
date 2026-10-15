@@ -4,7 +4,7 @@ import { use } from "react";
 import { ModelPreview } from "@/components/ModelPreview";
 import { RoutingTable } from "@/components/RoutingTable";
 import { ErrorBox, StatusBadge, formatSeconds, formatTime } from "@/components/ui";
-import { PROFILE_LABELS, STAGE_LABELS, api } from "@/lib/api";
+import { PROFILE_LABELS, STAGE_LABELS, api, jobTitle } from "@/lib/api";
 import { usePolling } from "@/lib/usePolling";
 
 const FINISHED = new Set(["succeeded", "failed", "cancelled"]);
@@ -21,7 +21,7 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
   return (
     <div className="stack">
       <div className="row">
-        <h1>{job.spec.prompt || job.spec.task_type}</h1>
+        <h1>{jobTitle(job.spec.prompt, job.spec.task_type)}</h1>
         <StatusBadge status={job.status} />
         {running && <span className="small muted">{STAGE_LABELS[job.stage] ?? job.stage}…</span>}
         <span className="spacer" />
@@ -45,6 +45,12 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
             <img src={thumb} alt="썸네일" className="viewer" style={{ objectFit: "contain" }} />
           ) : (
             <div className="viewer" />
+          )}
+          {job.request.image_id && (
+            <div className="row small muted">
+              <img src={api.uploadUrl(job.request.image_id)} alt="입력 이미지" className="thumb" />
+              입력 이미지
+            </div>
           )}
           {result && (
             <div className="row">
