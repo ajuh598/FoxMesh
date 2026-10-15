@@ -28,6 +28,7 @@ AI끼리 자연어로 대화하거나 토론하는 단계는 없습니다. 모�
 | `backend/foxmesh/api/` | FastAPI HTTP API |
 | `backend/foxmesh/inference/` | GPU 추론 서버: 모델을 메모리에 유지(프로세스 재사용), VRAM 예산 내 LRU 언로드 |
 | `frontend/` | Next.js 웹: 대시보드, 생성 페이지, 작업 상세(3D 미리보기), 실행 엔진 관리 |
+| `ai/` | 전용 AI 모델 **FoxMesh**와 학습 라이브러리 `foxmesh-ai`: 데이터셋 관리, 합성 데이터, 학습·파인튜닝, 평가, 버전 관리 ([ai/README.md](ai/README.md)) |
 
 ## 모델 자동 선택
 
@@ -179,6 +180,21 @@ GPU 모델이 연결되지 않은 기본 상태에서는 내장 **Image Relief**
 이 방식은 윤곽 기반 2.5D 모델이라 보이지 않는 뒷면을 추정하지 않습니다. 실제 3D 복원이 필요하면 TripoSR·TRELLIS·
 Hunyuan3D 같은 이미지→3D 모델을 아래 방법으로 연결하세요. 정확도 점수가 더 높아 연결되면 자동으로 우선 선택됩니다.
 
+## 전용 모델 FoxMesh
+
+`ai/`의 FoxMesh는 플랫폼이 직접 학습하고 운영하는 텍스트·이미지 → 3D 모델입니다. 학습한 버전을 등록하면 자동 선택
+엔진의 후보가 됩니다.
+
+```bash
+pip install -e "ai[torch]"
+foxmesh-ai dataset synth data/foxmesh --count 2000 && foxmesh-ai dataset preprocess data/foxmesh
+foxmesh-ai train data/foxmesh --out runs/v1 --preset small
+foxmesh-ai models register --store models runs/v1/checkpoints/best.pt --eval data/foxmesh --promote
+foxmesh-ai models export --store models --to $FOXMESH_MODELS_DIR   # 자동 선택 엔진에 등록
+```
+
+자세한 내용은 [ai/README.md](ai/README.md)를 보세요.
+
 ## 실제 AI 모델 연결
 
 기본 상태에서는 내장 **절차적 생성기**(키워드로 검·테이블·의자·나무·집 등 기본 형상 조립)와 내장 **Image Relief**
@@ -223,4 +239,6 @@ Hunyuan3D 같은 이미지→3D 모델을 아래 방법으로 연결하세요. �
 - [x] 4단계 성능 최적화: VRAM 기반 실행 제한(대기 포함), 모델 프로세스 재사용(미리 올리기·유휴 언로드),
   캐싱과 중복 작업 방지(재시작 후 유지, 보존 기간 정리), 모델별 성능 평가(벤치마크), 오류 복구(작업 저장·재시작
   복구, 차단기)와 대체 실행. 여러 서버가 대기열을 나눠 쓰는 Redis 기반 분산 큐는 아직 없음(현재는 서버 하나에서 처리)
-- [ ] 5단계 자체 AI 개발: 자체 모델은 `ModelRunner` + JSON 설명 파일로 등록하면 자동 선택 대상에 포함됨
+- [x] 5단계 자체 AI 개발: 전용 모델 FoxMesh(텍스트·이미지 → 3D)와 `foxmesh-ai` 라이브러리. 데이터셋 관리, 모델
+  파인튜닝, 생성 품질 평가, 모델 버전 관리, 자동 선택 엔진 등록(`foxmesh-ai models export`). 동봉된 v1은 합성 데이터
+  16종으로만 학습했으므로 실제 에셋으로 파인튜닝해야 범위가 넓어짐

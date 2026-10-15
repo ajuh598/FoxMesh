@@ -7,6 +7,7 @@ from importlib.metadata import entry_points
 
 from ..schemas import ModelSpec
 from .base import GenerationAdapter, GenerationResult, TransientError
+from .foxmesh_ai import FoxMeshAIAdapter
 from .http import HttpInferenceAdapter
 from .image_relief import ImageReliefAdapter
 from .procedural import ProceduralAdapter
@@ -14,7 +15,7 @@ from .procedural import ProceduralAdapter
 log = logging.getLogger(__name__)
 
 __all__ = [
-    "AdapterRegistry", "GenerationAdapter", "GenerationResult", "TransientError",
+    "AdapterRegistry", "FoxMeshAIAdapter", "GenerationAdapter", "GenerationResult", "TransientError",
     "HttpInferenceAdapter", "ImageReliefAdapter", "ProceduralAdapter",
 ]
 
@@ -22,7 +23,8 @@ __all__ = [
 class AdapterRegistry:
     def __init__(self, adapters: list[GenerationAdapter] | None = None, load_plugins: bool = True):
         self._adapters: dict[str, GenerationAdapter] = {}
-        for adapter in adapters if adapters is not None else [ProceduralAdapter(), ImageReliefAdapter(), HttpInferenceAdapter()]:
+        defaults = [ProceduralAdapter(), ImageReliefAdapter(), HttpInferenceAdapter(), FoxMeshAIAdapter()]
+        for adapter in adapters if adapters is not None else defaults:
             self.add(adapter)
         if load_plugins:
             self._load_entry_points()
